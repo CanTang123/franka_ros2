@@ -32,11 +32,20 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 # Setup user configuration
-RUN groupadd --gid $USER_GID $USERNAME \
-    && useradd --uid $USER_UID --gid $USER_GID -m $USERNAME --groups dialout \
-    && echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers \
-    && echo "source /opt/ros/$ROS_DISTRO/setup.bash" >> /home/$USERNAME/.bashrc \
-    && echo "source /usr/share/colcon_argcomplete/hook/colcon-argcomplete.bash" >> /home/$USERNAME/.bashrc
+RUN set -eux; \
+    existing_user="$(getent passwd "$USER_UID" | cut -d: -f1 || true)"; \
+    if [ -n "$existing_user" ] && [ "$existing_user" != "$USERNAME" ]; then \
+        userdel --remove "$existing_user"; \
+    fi; \
+    existing_group="$(getent group "$USER_GID" | cut -d: -f1 || true)"; \
+    if [ -n "$existing_group" ] && [ "$existing_group" != "$USERNAME" ]; then \
+        groupdel "$existing_group"; \
+    fi; \
+    groupadd --gid "$USER_GID" "$USERNAME"; \
+    useradd --uid "$USER_UID" --gid "$USER_GID" -m "$USERNAME" --groups dialout; \
+    echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers; \
+    echo "source /opt/ros/$ROS_DISTRO/setup.bash" >> "/home/$USERNAME/.bashrc"; \
+    echo "source /usr/share/colcon_argcomplete/hook/colcon-argcomplete.bash" >> "/home/$USERNAME/.bashrc"
 
 USER $USERNAME
 

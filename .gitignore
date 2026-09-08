@@ -22,3 +22,6 @@ serial
 activity.log
 task.md
 test-status.md
+
+*.pyc
+__pycache__/
