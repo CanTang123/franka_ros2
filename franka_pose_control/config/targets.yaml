@@ -1,0 +1,18 @@
+# 每次选择一个命名目标规划；不会自动连续执行所有目标。
+targets:
+  up_1cm:
+    mode: line
+    position: [0.0, 0.0, 0.01]
+    relative: true
+    # orientation 省略时保持当前实测姿态；填写时顺序为 x y z w。
+  point_a:
+    mode: line
+    position: [0.5, 0.0, 0.5]
+    relative: false
+  point_b:
+    mode: ptp
+    position: [0.3, 0.02, 0.31]
+    relative: false
+    # orientation: [1.0, 0.0, 0.0, 0.0]
+  home:
+    mode: home

@@ -1,0 +1,45 @@
+/**:
+  ros__parameters:
+    # Names used by franka_fr3_moveit_config.
+    planning_group: fr3_arm
+    end_effector_link: fr3_hand_tcp
+    reference_frame: base
+    controller_name: fr3_arm_controller
+    current_pose_topic: /franka_robot_state_broadcaster/current_pose
+    move_group_action: /move_action
+    execute_trajectory_action: /execute_trajectory
+    cartesian_path_service: /compute_cartesian_path
+
+    # Conservative first-use limits. Increase only after validating the scene.
+    velocity_scaling: 0.05
+    acceleration_scaling: 0.05
+    planning_time: 5.0
+    planning_attempts: 5
+    position_tolerance: 0.005
+    orientation_tolerance: 0.02
+
+    # A target is rejected if it is too far from the latest measured TCP pose.
+    max_translation_per_goal: 0.1
+    max_rotation_per_goal: 0.35
+    max_current_pose_age: 1.0
+    max_plan_age: 60.0
+    max_start_translation_drift: 0.01
+    max_start_rotation_drift: 0.10
+
+    # Collision-checked straight Cartesian path settings.
+    cartesian_eef_step: 0.005
+    cartesian_min_fraction: 1.0
+    cartesian_revolute_jump_threshold: 0.20
+    max_cartesian_translation: 0.20
+    max_cartesian_rotation: 0.35
+    max_cartesian_speed: 0.05
+
+    # Coarse TCP bounding box in the base frame; this is not a collision model.
+    workspace_min: [0.10, -0.60, 0.10]
+    workspace_max: [0.85, 0.60, 0.90]
+
+    # Joint-space Home pose. Calling plan_home only plans; execute remains explicit.
+    home_joint_names:
+      [fr3_joint1, fr3_joint2, fr3_joint3, fr3_joint4, fr3_joint5, fr3_joint6, fr3_joint7]
+    home_joint_positions: [0.0, 0.0, 0.0, -1.5708, 0.0, 1.5708, 0.7854]
+    home_joint_tolerance: 0.005
