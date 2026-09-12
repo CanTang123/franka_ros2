@@ -7,6 +7,8 @@ ros2 launch franka_fr3_moveit_config moveit.launch.py \
   load_gripper:=true
 `
 
+FR3 DeMoFlow A/B/Direct/Bypass 四方法的服务器推理与实测状态闭环接入见 [实机比较说明](../tools/fr3_comparison/README.md)。
+
 Stage 3 强化学习策略的真机桥接、dry-run 和安全启停说明见 `README_STAGE3.md`。
 
 `pose_target_node` 为 FR3 提供带安全确认机制的普通点到点、笛卡尔直线和 Home 控制。使用本节点前，机器人应已通过

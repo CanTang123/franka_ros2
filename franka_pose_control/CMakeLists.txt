@@ -47,6 +47,8 @@ ament_target_dependencies(
 
 install(TARGETS pose_target_node DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS scripts/pose scripts/stage3_command scripts/stage3_policy_node DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS ../tools/fr3_comparison/online_client.py DESTINATION lib/${PROJECT_NAME} RENAME fr3_comparison_node)
+install(FILES ../tools/fr3_comparison/protocol.py DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config launch models DESTINATION share/${PROJECT_NAME})
 install(FILES README.md README_STAGE3.md requirements-stage3.txt DESTINATION share/${PROJECT_NAME})
 
