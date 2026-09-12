@@ -103,6 +103,9 @@
     ros__parameters:
       external_target_mode: true
       equilibrium_pose_frame: base
+      translational_stiffness: 150.0
+      rotational_stiffness: 10.0
+      nullspace_stiffness: 20.0
 
 /**:
   franka_robot_state_broadcaster:
@@ -110,7 +113,7 @@
       # Publish rate in Hz for convenience topics (current_pose, joint_states, wrenches, etc.).
       # Clamped to this controller's update_rate, which defaults to the controller
       # manager's. The full robot state always publishes at the update rate.
-      convenience_publish_rate: 1000
+      convenience_publish_rate: 60
 
 /**:
   joint_impedance_with_ik_example_controller:

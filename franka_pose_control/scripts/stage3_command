@@ -33,6 +33,9 @@ def main() -> None:
     message.target_pose.position.y = args.target_y
     message.target_pose.position.z = args.target_z
     message.target_pose.orientation.x = 1.0
+    message.target_pose.orientation.y = 0.0
+    message.target_pose.orientation.z = 0.0
+    message.target_pose.orientation.w = 0.0
     message.forbidden_center.x = args.forbidden_x
     message.forbidden_center.y = args.forbidden_y
     message.forbidden_center.z = args.target_z

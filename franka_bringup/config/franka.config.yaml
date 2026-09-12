@@ -17,7 +17,7 @@ ROBOT1: # Arbitrary identifier for the first robot (a Mnemonic)
   namespace: "" # Namespace for robot, any string (empty string allowed - meaningful names recommended)
   robot_ip: "192.168.0.1" # Robot’s IP address or hostname
   use_fake_hardware: "false" # Use simulated hardware ("true" or "false")
-  use_rviz: "true" # Launch RViz if "true" (single instance for all namespaces)
+  use_rviz: "false" # Launch RViz if "true" (single instance for all namespaces)
 # Uncomment the following lines to add more robots in Namespaces
 # ROBOT2:
 #   robot_type: ""

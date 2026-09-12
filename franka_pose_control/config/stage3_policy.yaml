@@ -8,11 +8,11 @@ fr3_stage3_policy:
     dry_run: true
     auto_enable: false
     state_timeout_s: 0.10
-    max_reference_step_m: 0.001
+    max_reference_step_m: 0.003
     max_joint_velocity_rad_s: 0.6
     forbidden_stop_margin_m: 0.005
     target_height_tolerance_m: 0.005
     target_orientation_tolerance_rad: 0.0872664626
-    start_height_tolerance_m: 0.015
+    start_height_tolerance_m: 0.02
     start_orientation_tolerance_rad: 0.1745329252
     require_controller_subscriber: true

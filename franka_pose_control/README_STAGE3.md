@@ -37,7 +37,7 @@ ros2 run tf2_ros tf2_echo base fr3_hand_tcp
 
 ```bash
 ros2 launch franka_bringup example.launch.py \
-  controller_names:=cartesian_impedance_policy_controller
+  controller_names:=cartesian_impedance_policy_controller robot_ips:=172.16.0.2
 ```
 
 另一个终端启动策略节点；默认只计算和发布调试参考：

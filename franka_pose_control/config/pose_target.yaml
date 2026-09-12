@@ -19,7 +19,7 @@
     orientation_tolerance: 0.02
 
     # A target is rejected if it is too far from the latest measured TCP pose.
-    max_translation_per_goal: 0.1
+    max_translation_per_goal: 0.3
     max_rotation_per_goal: 0.35
     max_current_pose_age: 1.0
     max_plan_age: 60.0
