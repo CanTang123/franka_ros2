@@ -1,0 +1,15 @@
+std_msgs/Header header
+string command_id
+bool armed
+bool dry_run
+bool state_ready
+bool direct_path_blocked
+bool detour_waypoint_valid
+bool detour_waypoint_reached
+float64 target_position_error
+float64 forbidden_clearance
+float64 tcp_speed
+float64[2] raw_action
+float64[2] bounded_action
+geometry_msgs/Pose reference_pose
+string detail

@@ -36,6 +36,8 @@ CartesianImpedanceExampleController::CallbackReturn CartesianImpedanceExampleCon
     auto_declare<double>("nullspace_stiffness", 20.0);
     auto_declare<double>("translational_stiffness", 150.0);
     auto_declare<double>("rotational_stiffness", 10.0);
+    auto_declare<bool>("external_target_mode", false);
+    auto_declare<std::string>("equilibrium_pose_frame", "base");
   } catch (const std::exception& e) {
     fprintf(stderr, "Exception thrown during init stage with message: %s \n", e.what());
     return CallbackReturn::ERROR;
@@ -96,6 +98,8 @@ CartesianImpedanceExampleController::on_configure(
   const double t_k = get_node()->get_parameter("translational_stiffness").as_double();
   const double r_k = get_node()->get_parameter("rotational_stiffness").as_double();
   const double n_k = get_node()->get_parameter("nullspace_stiffness").as_double();
+  external_target_mode_ = get_node()->get_parameter("external_target_mode").as_bool();
+  equilibrium_pose_frame_ = get_node()->get_parameter("equilibrium_pose_frame").as_string();
 
   CartesianGains gains = buildGains({t_k, t_k, t_k, r_k, r_k, r_k});
   cartesian_stiffness_ = gains.stiffness;
@@ -190,8 +194,11 @@ controller_interface::return_type CartesianImpedanceExampleController::update(
   transform.translation() = position;
   transform.rotate(orientation.toRotationMatrix());
 
+  if (!external_target_mode_) {
+    const TargetPose current_target = *target_pose_buffer_.readFromRT();
+    updateMotionTarget(period.seconds(), current_target.orientation);
+  }
   const TargetPose target = *target_pose_buffer_.readFromRT();
-  updateMotionTarget(period.seconds(), target.orientation);
 
   const CartesianGains target_gains = *cartesian_gains_buffer_.readFromRT();
   const double target_nullspace_stiffness = *nullspace_stiffness_buffer_.readFromRT();
@@ -278,15 +285,22 @@ Eigen::Matrix<double, 6, 1> CartesianImpedanceExampleController::computeError(
 
 void CartesianImpedanceExampleController::equilibriumPoseCallback(
     const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+  if (!msg->header.frame_id.empty() && msg->header.frame_id != equilibrium_pose_frame_) {
+    RCLCPP_WARN(get_node()->get_logger(),
+                "Discarding equilibrium pose in frame '%s'; expected '%s'.",
+                msg->header.frame_id.c_str(), equilibrium_pose_frame_.c_str());
+    return;
+  }
   TargetPose target;
   target.position << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z;
   target.orientation = Eigen::Quaterniond(msg->pose.orientation.w, msg->pose.orientation.x,
                                           msg->pose.orientation.y, msg->pose.orientation.z);
 
   // Reject malformed input rather than letting NaNs poison the RT thread.
-  if (target.orientation.coeffs().norm() < 1e-6) {
+  if (!target.position.allFinite() || !target.orientation.coeffs().allFinite() ||
+      target.orientation.coeffs().norm() < 1e-6) {
     RCLCPP_WARN(get_node()->get_logger(),
-                "Discarding equilibrium pose with degenerate quaternion.");
+                "Discarding equilibrium pose with non-finite values or degenerate quaternion.");
     return;
   }
   target.orientation.normalize();

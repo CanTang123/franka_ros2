@@ -1,5 +1,7 @@
 # Franka 笛卡尔位姿控制
 
+Stage 3 强化学习策略的真机桥接、dry-run 和安全启停说明见 `README_STAGE3.md`。
+
 `pose_target_node` 为 FR3 提供带安全确认机制的普通点到点、笛卡尔直线和 Home 控制。使用本节点前，机器人应已通过
 `franka_fr3_moveit_config/moveit.launch.py` 启动，并且 MoveIt 和真实机械臂连接正常。
 
