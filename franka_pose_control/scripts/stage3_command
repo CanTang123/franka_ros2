@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+
+"""Publish one atomic target and forbidden-region command."""
+
+import argparse
+
+from franka_pose_control.msg import Stage3PolicyCommand
+import rclpy
+from rclpy.node import Node
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command_id')
+    parser.add_argument('target_x', type=float)
+    parser.add_argument('target_y', type=float)
+    parser.add_argument('--target_z', type=float, default=0.10)
+    parser.add_argument('--forbidden_x', type=float, default=0.0)
+    parser.add_argument('--forbidden_y', type=float, default=0.0)
+    parser.add_argument('--forbidden_radius', type=float, default=0.0)
+    parser.add_argument('--avoidance', action='store_true')
+    parser.add_argument('--topic', default='/fr3_stage3_policy/command')
+    parser.add_argument('--frame', default='base')
+    args = parser.parse_args()
+    rclpy.init()
+    node = Node('stage3_command')
+    publisher = node.create_publisher(Stage3PolicyCommand, args.topic, 10)
+    message = Stage3PolicyCommand()
+    message.header.stamp = node.get_clock().now().to_msg()
+    message.header.frame_id = args.frame
+    message.command_id = args.command_id
+    message.target_pose.position.x = args.target_x
+    message.target_pose.position.y = args.target_y
+    message.target_pose.position.z = args.target_z
+    message.target_pose.orientation.x = 1.0
+    message.forbidden_center.x = args.forbidden_x
+    message.forbidden_center.y = args.forbidden_y
+    message.forbidden_center.z = args.target_z
+    message.forbidden_radius = args.forbidden_radius
+    message.avoidance_enabled = args.avoidance
+    for _ in range(5):
+        publisher.publish(message)
+        rclpy.spin_once(node, timeout_sec=0.05)
+    node.get_logger().info(f'Published Stage 3 command {args.command_id!r}')
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

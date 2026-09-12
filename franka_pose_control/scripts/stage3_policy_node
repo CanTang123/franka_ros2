@@ -1,0 +1,453 @@
+#!/usr/bin/env python3
+
+"""Run the exported FR3 Stage 3 policy against live robot state."""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+
+from ament_index_python.packages import get_package_share_directory
+from franka_pose_control.msg import Stage3PolicyCommand, Stage3PolicyStatus
+from franka_pose_control_policy.stage3_policy import (
+    DeploymentContract,
+    Stage3Policy,
+    WaypointPlan,
+    WaypointPlanner,
+)
+from geometry_msgs.msg import Pose, PoseStamped
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import JointState
+from std_srvs.srv import SetBool, Trigger
+
+
+def _pose_array(pose: Pose) -> np.ndarray:
+    return np.asarray(
+        (
+            pose.position.x,
+            pose.position.y,
+            pose.position.z,
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w,
+        ),
+        dtype=np.float64,
+    )
+
+
+def _quaternion_error(first: np.ndarray, second: np.ndarray) -> float:
+    first = first / np.linalg.norm(first)
+    second = second / np.linalg.norm(second)
+    return 2.0 * math.acos(float(np.clip(abs(np.dot(first, second)), 0.0, 1.0)))
+
+
+class Stage3PolicyNode(Node):
+    """Safety-gated bridge from live FR3 state to Cartesian impedance targets."""
+
+    def __init__(self) -> None:
+        super().__init__('fr3_stage3_policy')
+        share_dir = Path(get_package_share_directory('franka_pose_control'))
+        default_contract = share_dir / 'models' / 'stage3_model_600' / 'stage3_policy.yaml'
+        self.declare_parameter('contract_path', str(default_contract))
+        self.declare_parameter(
+            'current_pose_topic', '/franka_robot_state_broadcaster/current_pose'
+        )
+        self.declare_parameter(
+            'joint_state_topic', '/franka_robot_state_broadcaster/measured_joint_states'
+        )
+        self.declare_parameter(
+            'controller_target_topic', '/cartesian_impedance_policy_controller/equilibrium_pose'
+        )
+        self.declare_parameter('expected_frame', 'base')
+        self.declare_parameter('policy_rate_hz', 30.0)
+        self.declare_parameter('dry_run', True)
+        self.declare_parameter('auto_enable', False)
+        self.declare_parameter('state_timeout_s', 0.10)
+        self.declare_parameter('max_reference_step_m', 0.001)
+        self.declare_parameter('max_joint_velocity_rad_s', 0.6)
+        self.declare_parameter('forbidden_stop_margin_m', 0.005)
+        self.declare_parameter('target_height_tolerance_m', 0.005)
+        self.declare_parameter('target_orientation_tolerance_rad', math.radians(5.0))
+        self.declare_parameter('start_height_tolerance_m', 0.015)
+        self.declare_parameter('start_orientation_tolerance_rad', math.radians(10.0))
+        self.declare_parameter('require_controller_subscriber', True)
+
+        self.contract = DeploymentContract.load(self.get_parameter('contract_path').value)
+        self.policy = Stage3Policy(self.contract)
+        self.planner = WaypointPlanner(self.contract)
+        self.expected_frame = str(self.get_parameter('expected_frame').value)
+        self.dry_run = bool(self.get_parameter('dry_run').value)
+        self.state_timeout = float(self.get_parameter('state_timeout_s').value)
+        self.max_reference_step = float(self.get_parameter('max_reference_step_m').value)
+        self.max_joint_velocity = float(self.get_parameter('max_joint_velocity_rad_s').value)
+        self.forbidden_stop_margin = float(self.get_parameter('forbidden_stop_margin_m').value)
+        if not 0.0 < self.max_reference_step <= self.contract.model_max_step:
+            raise ValueError(
+                f'max_reference_step_m must be in (0, {self.contract.model_max_step}]'
+            )
+
+        self.joint_position: np.ndarray | None = None
+        self.joint_velocity: np.ndarray | None = None
+        self.joint_state_time = None
+        self.tcp_pose: np.ndarray | None = None
+        self.tcp_speed = 0.0
+        self.pose_time = None
+        self.previous_tcp_position: np.ndarray | None = None
+        self.previous_pose_time = None
+        self.previous_action = np.zeros(2, dtype=np.float32)
+        self.command: Stage3PolicyCommand | None = None
+        self.plan: WaypointPlan | None = None
+        self.detour_waypoint_reached = False
+        self.armed = False
+        self.detail = 'waiting for robot state and command'
+        self.last_reference = self._make_pose(
+            self.contract.target_height, self.contract.target_orientation_xyzw
+        )
+
+        pose_topic = str(self.get_parameter('current_pose_topic').value)
+        joint_topic = str(self.get_parameter('joint_state_topic').value)
+        controller_topic = str(self.get_parameter('controller_target_topic').value)
+        self.create_subscription(
+            PoseStamped, pose_topic, self._pose_callback, qos_profile_sensor_data
+        )
+        self.create_subscription(
+            JointState, joint_topic, self._joint_state_callback, qos_profile_sensor_data
+        )
+        self.create_subscription(Stage3PolicyCommand, '~/command', self._command_callback, 10)
+        self.controller_publisher = self.create_publisher(PoseStamped, controller_topic, 10)
+        self.reference_publisher = self.create_publisher(PoseStamped, '~/reference_pose', 10)
+        self.status_publisher = self.create_publisher(Stage3PolicyStatus, '~/status', 10)
+        self.create_service(SetBool, '~/enable', self._enable_callback)
+        self.create_service(Trigger, '~/stop', self._stop_callback)
+        rate = float(self.get_parameter('policy_rate_hz').value)
+        if rate <= 0.0:
+            raise ValueError('policy_rate_hz must be positive')
+        self.timer = self.create_timer(1.0 / rate, self._policy_step)
+        self.auto_enable = bool(self.get_parameter('auto_enable').value)
+        if self.auto_enable and not self.dry_run:
+            raise ValueError('auto_enable is only permitted in dry-run mode')
+        self.get_logger().info(
+            f'Loaded Stage 3 policy; dry_run={self.dry_run}, '
+            f'max_reference_step={self.max_reference_step:.4f} m'
+        )
+
+    def _make_pose(self, height: float, orientation: np.ndarray) -> Pose:
+        pose = Pose()
+        pose.position.z = float(height)
+        pose.orientation.x = float(orientation[0])
+        pose.orientation.y = float(orientation[1])
+        pose.orientation.z = float(orientation[2])
+        pose.orientation.w = float(orientation[3])
+        return pose
+
+    def _pose_callback(self, message: PoseStamped) -> None:
+        if message.header.frame_id and message.header.frame_id != self.expected_frame:
+            self._disarm(
+                f'current pose frame is {message.header.frame_id!r}, '
+                f'expected {self.expected_frame!r}'
+            )
+            return
+        pose = _pose_array(message.pose)
+        if not np.all(np.isfinite(pose)) or np.linalg.norm(pose[3:]) < 1.0e-6:
+            self._disarm('received invalid current pose')
+            return
+        now = self.get_clock().now()
+        if self.previous_tcp_position is not None and self.previous_pose_time is not None:
+            elapsed = (now - self.previous_pose_time).nanoseconds * 1.0e-9
+            if elapsed > 1.0e-6:
+                self.tcp_speed = float(
+                    np.linalg.norm(pose[:3] - self.previous_tcp_position) / elapsed
+                )
+        self.tcp_pose = pose
+        self.pose_time = now
+        self.previous_tcp_position = pose[:3].copy()
+        self.previous_pose_time = now
+
+    def _joint_state_callback(self, message: JointState) -> None:
+        index = {name: offset for offset, name in enumerate(message.name)}
+        if any(name not in index for name in self.contract.joint_names):
+            self._disarm('measured joint state does not contain all seven FR3 arm joints')
+            return
+        try:
+            position = np.asarray(
+                [message.position[index[name]] for name in self.contract.joint_names],
+                dtype=np.float64,
+            )
+            velocity = np.asarray(
+                [message.velocity[index[name]] for name in self.contract.joint_names],
+                dtype=np.float64,
+            )
+        except IndexError:
+            self._disarm('measured joint state arrays are incomplete')
+            return
+        if not np.all(np.isfinite(position)) or not np.all(np.isfinite(velocity)):
+            self._disarm('received non-finite joint state')
+            return
+        self.joint_position = position
+        self.joint_velocity = velocity
+        self.joint_state_time = self.get_clock().now()
+
+    def _command_callback(self, message: Stage3PolicyCommand) -> None:
+        if self.tcp_pose is None:
+            self.get_logger().error('Rejecting command before a valid current pose is available')
+            return
+        if message.header.frame_id and message.header.frame_id != self.expected_frame:
+            self.get_logger().error(
+                f'Rejecting command frame {message.header.frame_id!r}; '
+                f'expected {self.expected_frame!r}'
+            )
+            return
+        pose = _pose_array(message.target_pose)
+        center = np.asarray(
+            (message.forbidden_center.x, message.forbidden_center.y), dtype=np.float64
+        )
+        if (
+            not np.all(np.isfinite(pose))
+            or not np.all(np.isfinite(center))
+            or not math.isfinite(message.forbidden_radius)
+        ):
+            self.get_logger().error('Rejecting command with non-finite values')
+            return
+        if not (
+            self.contract.planner_workspace_x[0] <= pose[0] <= self.contract.planner_workspace_x[1]
+            and self.contract.planner_workspace_y[0]
+            <= pose[1]
+            <= self.contract.planner_workspace_y[1]
+        ):
+            self.get_logger().error('Rejecting target outside the Stage 3 training workspace')
+            return
+        height_tolerance = float(self.get_parameter('target_height_tolerance_m').value)
+        if abs(pose[2] - self.contract.target_height) > height_tolerance:
+            self.get_logger().error(
+                'Rejecting target whose height differs from the trained fixed plane'
+            )
+            return
+        if np.linalg.norm(pose[3:]) < 1.0e-6:
+            self.get_logger().error('Rejecting target with a degenerate quaternion')
+            return
+        orientation_tolerance = float(self.get_parameter('target_orientation_tolerance_rad').value)
+        if (
+            _quaternion_error(pose[3:], self.contract.target_orientation_xyzw)
+            > orientation_tolerance
+        ):
+            self.get_logger().error(
+                'Rejecting target orientation outside the trained fixed orientation'
+            )
+            return
+        if message.avoidance_enabled and message.forbidden_radius <= 0.0:
+            self.get_logger().error('Rejecting enabled forbidden region with non-positive radius')
+            return
+        plan = self.planner.plan(
+            self.tcp_pose[:2],
+            pose[:2],
+            center,
+            float(message.forbidden_radius),
+            message.avoidance_enabled,
+        )
+        if plan.direct_path_blocked and not plan.waypoint_valid:
+            self._disarm('no valid Stage 3 detour waypoint exists for the command')
+            return
+        self.command = message
+        self.plan = plan
+        self.detour_waypoint_reached = False
+        self.previous_action.fill(0.0)
+        self.detail = 'command accepted'
+        if self.auto_enable and self._state_ready()[0]:
+            self.armed = True
+        self.get_logger().info(
+            f'Accepted command {message.command_id!r}; blocked={plan.direct_path_blocked}, '
+            f'waypoint_valid={plan.waypoint_valid}'
+        )
+
+    def _state_ready(self) -> tuple[bool, str]:
+        if self.tcp_pose is None or self.joint_position is None or self.joint_velocity is None:
+            return False, 'robot state is incomplete'
+        now = self.get_clock().now()
+        if (
+            self.pose_time is None
+            or (now - self.pose_time).nanoseconds * 1.0e-9 > self.state_timeout
+        ):
+            return False, 'current pose is stale'
+        if (
+            self.joint_state_time is None
+            or (now - self.joint_state_time).nanoseconds * 1.0e-9 > self.state_timeout
+        ):
+            return False, 'joint state is stale'
+        if float(np.max(np.abs(self.joint_velocity))) > self.max_joint_velocity:
+            return False, 'joint velocity exceeds deployment limit'
+        if (
+            not self.contract.action_workspace_x[0]
+            <= self.tcp_pose[0]
+            <= self.contract.action_workspace_x[1]
+        ):
+            return False, 'current TCP x is outside the trained action workspace'
+        if (
+            not self.contract.action_workspace_y[0]
+            <= self.tcp_pose[1]
+            <= self.contract.action_workspace_y[1]
+        ):
+            return False, 'current TCP y is outside the trained action workspace'
+        height_tolerance = float(self.get_parameter('start_height_tolerance_m').value)
+        if abs(self.tcp_pose[2] - self.contract.target_height) > height_tolerance:
+            return False, 'current TCP height is outside the deployment start tolerance'
+        orientation_tolerance = float(self.get_parameter('start_orientation_tolerance_rad').value)
+        if (
+            _quaternion_error(self.tcp_pose[3:], self.contract.target_orientation_xyzw)
+            > orientation_tolerance
+        ):
+            return False, 'current TCP orientation is outside the deployment start tolerance'
+        return True, 'state ready'
+
+    def _enable_callback(
+        self, request: SetBool.Request, response: SetBool.Response
+    ) -> SetBool.Response:
+        if not request.data:
+            self._disarm('disabled by operator')
+            response.success = True
+            response.message = self.detail
+            return response
+        ready, reason = self._state_ready()
+        if not ready or self.command is None or self.plan is None:
+            response.success = False
+            response.message = reason if not ready else 'no accepted command'
+            return response
+        require_subscriber = bool(self.get_parameter('require_controller_subscriber').value)
+        if (
+            not self.dry_run
+            and require_subscriber
+            and self.controller_publisher.get_subscription_count() == 0
+        ):
+            response.success = False
+            response.message = 'Cartesian impedance controller is not subscribed'
+            return response
+        self.armed = True
+        self.detail = 'armed in dry-run mode' if self.dry_run else 'armed'
+        response.success = True
+        response.message = self.detail
+        return response
+
+    def _stop_callback(
+        self, request: Trigger.Request, response: Trigger.Response
+    ) -> Trigger.Response:
+        del request
+        self._disarm('stopped by operator')
+        response.success = True
+        response.message = self.detail
+        return response
+
+    def _disarm(self, reason: str) -> None:
+        if self.armed:
+            self.get_logger().error(f'Policy disarmed: {reason}')
+        self.armed = False
+        self.detail = reason
+
+    def _policy_step(self) -> None:
+        ready, reason = self._state_ready()
+        if self.armed and not ready:
+            self._disarm(reason)
+        if not ready or self.command is None or self.plan is None:
+            self._publish_status(ready, np.zeros(2), np.zeros(2))
+            return
+
+        target = _pose_array(self.command.target_pose)
+        target[2] = self.contract.target_height
+        target[3:] = self.contract.target_orientation_xyzw
+        center = np.asarray(
+            (self.command.forbidden_center.x, self.command.forbidden_center.y), dtype=np.float64
+        )
+        radius = float(self.command.forbidden_radius)
+        clearance = float(np.linalg.norm(self.tcp_pose[:2] - center) - radius)
+        if self.command.avoidance_enabled and clearance <= self.forbidden_stop_margin:
+            self._disarm('TCP entered the forbidden-region safety margin')
+            self._publish_status(ready, np.zeros(2), np.zeros(2))
+            return
+
+        if self.plan.direct_path_blocked and not self.detour_waypoint_reached:
+            distance = float(np.linalg.norm(self.tcp_pose[:2] - self.plan.waypoint_xy))
+            self.detour_waypoint_reached = distance <= self.contract.waypoint_switch_distance
+        use_detour = self.plan.direct_path_blocked and not self.detour_waypoint_reached
+        active_waypoint = self.plan.waypoint_xy if use_detour else target[:2]
+        observation = self.contract.build_observation(
+            self.joint_position,
+            self.joint_velocity,
+            target,
+            self.previous_action,
+            self.tcp_pose[:3],
+            center,
+            radius,
+            self.command.avoidance_enabled,
+            active_waypoint,
+        )
+        raw_action = self.policy.infer(observation)
+        previous_action, delta_xy = self.contract.process_action(
+            raw_action, self.max_reference_step
+        )
+        self.previous_action = previous_action
+        reference_xy = self.tcp_pose[:2] + delta_xy
+        reference_xy[0] = np.clip(reference_xy[0], *self.contract.action_workspace_x)
+        reference_xy[1] = np.clip(reference_xy[1], *self.contract.action_workspace_y)
+        reference = self._make_pose(
+            self.contract.target_height, self.contract.target_orientation_xyzw
+        )
+        reference.position.x = float(reference_xy[0])
+        reference.position.y = float(reference_xy[1])
+        self.last_reference = reference
+        stamped = PoseStamped()
+        stamped.header.stamp = self.get_clock().now().to_msg()
+        stamped.header.frame_id = self.expected_frame
+        stamped.pose = reference
+        self.reference_publisher.publish(stamped)
+        if self.armed and not self.dry_run:
+            self.controller_publisher.publish(stamped)
+        self.detail = 'policy running' if self.armed else 'policy ready but disarmed'
+        self._publish_status(ready, raw_action, delta_xy / self.max_reference_step)
+
+    def _publish_status(
+        self, ready: bool, raw_action: np.ndarray, bounded_action: np.ndarray
+    ) -> None:
+        status = Stage3PolicyStatus()
+        status.header.stamp = self.get_clock().now().to_msg()
+        status.header.frame_id = self.expected_frame
+        status.command_id = '' if self.command is None else self.command.command_id
+        status.armed = self.armed
+        status.dry_run = self.dry_run
+        status.state_ready = ready
+        status.direct_path_blocked = False if self.plan is None else self.plan.direct_path_blocked
+        status.detour_waypoint_valid = False if self.plan is None else self.plan.waypoint_valid
+        status.detour_waypoint_reached = self.detour_waypoint_reached
+        if self.command is not None and self.tcp_pose is not None:
+            target = _pose_array(self.command.target_pose)
+            status.target_position_error = float(np.linalg.norm(target[:3] - self.tcp_pose[:3]))
+            center = np.asarray((self.command.forbidden_center.x, self.command.forbidden_center.y))
+            status.forbidden_clearance = float(
+                np.linalg.norm(self.tcp_pose[:2] - center) - self.command.forbidden_radius
+            )
+        else:
+            status.target_position_error = math.nan
+            status.forbidden_clearance = math.nan
+        status.tcp_speed = self.tcp_speed
+        status.raw_action = [float(value) for value in raw_action]
+        status.bounded_action = [float(value) for value in bounded_action]
+        status.reference_pose = self.last_reference
+        status.detail = self.detail
+        self.status_publisher.publish(status)
+
+
+def main() -> None:
+    rclpy.init()
+    node = Stage3PolicyNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

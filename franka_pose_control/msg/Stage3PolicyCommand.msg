@@ -1,0 +1,6 @@
+std_msgs/Header header
+string command_id
+geometry_msgs/Pose target_pose
+geometry_msgs/Point forbidden_center
+float64 forbidden_radius
+bool avoidance_enabled

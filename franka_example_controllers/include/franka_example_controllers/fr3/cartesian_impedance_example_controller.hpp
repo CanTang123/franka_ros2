@@ -83,6 +83,8 @@ class CartesianImpedanceExampleController : public controller_interface::Control
   Eigen::Matrix<double, num_joints, 1> dq_{Eigen::Matrix<double, num_joints, 1>::Zero()};
 
   double filter_params_{0.005};
+  bool external_target_mode_{false};
+  std::string equilibrium_pose_frame_{"base"};
 
   Eigen::Matrix<double, num_cartesian_dof, num_cartesian_dof> cartesian_stiffness_;
   Eigen::Matrix<double, num_cartesian_dof, num_cartesian_dof> cartesian_damping_;

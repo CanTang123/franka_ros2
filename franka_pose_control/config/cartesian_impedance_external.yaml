@@ -1,0 +1,4 @@
+cartesian_impedance_example_controller:
+  ros__parameters:
+    external_target_mode: true
+    equilibrium_pose_frame: base

@@ -1,0 +1,127 @@
+bundle_version: 1
+task: Isaac-Reach-FR3-TCPXY-Constrained-Stage3-Play-v0
+source_checkpoint: /workspace/isaaclab/logs/rsl_rl/fr3_reach_tcp_xy_avoidance_stage3_balanced/2026-09-11_03-05-50/model_600.pt
+source_checkpoint_sha256: 45626779bd97f7022fbe7aa35c4356f9639948b93302af8e0a1dc3f3b8626c2a
+model:
+  input_name: obs
+  input_shape:
+  - 1
+  - 32
+  input_dtype: float32
+  output_name: actions
+  output_shape:
+  - 1
+  - 2
+  output_dtype: float32
+  actor: MLP(32,64,64,2), ELU
+  observation_normalization: false
+observations:
+- name: joint_pos
+  start: 0
+  stop: 7
+  description: q - q_default [rad]
+- name: joint_vel
+  start: 7
+  stop: 14
+  description: joint velocity relative to default [rad/s]
+- name: pose_command
+  start: 14
+  stop: 21
+  description: final TCP target [x,y,z,qx,qy,qz,qw] in base frame [m,-]
+- name: actions
+  start: 21
+  stop: 23
+  description: previous normalized actor action [-]
+- name: tcp_position
+  start: 23
+  stop: 26
+  description: measured TCP [x,y,z] in base frame [m]
+- name: constraint
+  start: 26
+  stop: 30
+  description: '[forbidden_dx,forbidden_dy,radius,enabled] [m,m,m,-]'
+- name: detour_waypoint
+  start: 30
+  stop: 32
+  description: active waypoint minus measured TCP [dx,dy] in base frame [m]
+action_processing:
+  raw_action: actor output [ax, ay]
+  component_clip:
+  - -1.0
+  - 1.0
+  euclidean_norm_limit: 1.0
+  max_step_m: 0.02
+  formula: bounded=clip(raw,-1,1)/max(norm(clip(raw,-1,1)),1); delta_xy_m=max_step_m*bounded
+  reference_formula: tcp_reference_xy=current_measured_tcp_xy+delta_xy_m
+control:
+  policy_rate_hz: 30.0
+  physics_and_ik_rate_hz: 120.0
+  ik_updates_per_policy_step: 4
+  tcp_frame: fr3_hand_tcp
+  reference_frame: fr3_link0/base
+  target_height_m: 0.1
+  target_orientation_xyzw:
+  - 1.0
+  - 0.0
+  - 0.0
+  - 0.0
+  workspace_x_m:
+  - 0.3
+  - 0.7
+  workspace_y_m:
+  - -0.25
+  - 0.25
+  max_joint_target_delta_per_ik_rad: 0.05
+robot:
+  joint_names:
+  - fr3_joint1
+  - fr3_joint2
+  - fr3_joint3
+  - fr3_joint4
+  - fr3_joint5
+  - fr3_joint6
+  - fr3_joint7
+  q_default_rad:
+  - -0.3571307063102722
+  - 0.04799912869930267
+  - -0.3272463381290436
+  - -2.7562460899353027
+  - 0.046233151108026505
+  - 2.801365375518799
+  - 0.057785358279943466
+waypoint_planner:
+  candidate_count: 64
+  candidate_clearance_m: 0.06
+  path_clearance_m: 0.025
+  switch_distance_m: 0.015
+  candidate_radial_scales:
+  - 1.0
+  - 1.5
+  - 2.0
+  workspace_x_m:
+  - 0.35
+  - 0.65
+  workspace_y_m:
+  - -0.17
+  - 0.17
+golden_vectors:
+  file: stage3_golden_vectors.npz
+  labels:
+  - clear_reset
+  - blocked_before_waypoint
+  - clear_after_one_step
+  - blocked_after_one_step
+  - blocked_after_waypoint_switch
+  selected_simulation_environment_ids:
+  - 0
+  - 2
+  - 0
+  - 2
+  - 2
+validation:
+  torchscript_max_abs_error: 1.1920928955078125e-07
+  onnx_max_abs_error: 1.1920928955078125e-07
+artifacts:
+  stage3_policy.pt: 00bb7f0837139d156e8f45b4ee1c365f239ab8e4e7e1b91d3a3acb41634348cd
+  stage3_policy.onnx: 92fb0d93fb1e91bf96af51cad7d298bd2373b15e8d27ac5333801ce13a615ad6
+  stage3_golden_vectors.npz: 4e984897dfc7dbb988ec5afc10c4165a73950888e55c59bdac2a0d2ce940ea2b

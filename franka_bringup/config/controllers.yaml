@@ -53,6 +53,9 @@
       cartesian_impedance_example_controller:
         type: franka_example_controllers/CartesianImpedanceExampleController
 
+      cartesian_impedance_policy_controller:
+        type: franka_example_controllers/CartesianImpedanceExampleController
+
       joint_position_example_controller:
         type: franka_example_controllers/JointPositionExampleController
 
@@ -94,6 +97,12 @@
         - 1.0
         - 1.0
         - 0.5
+
+/**:
+  cartesian_impedance_policy_controller:
+    ros__parameters:
+      external_target_mode: true
+      equilibrium_pose_frame: base
 
 /**:
   franka_robot_state_broadcaster:

@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""简短的位姿规划命令；执行始终需要单独调用。"""
+
+import argparse
+import copy
+import math
+import time
+
+import rclpy
+from geometry_msgs.msg import PoseStamped
+from rclpy.duration import Duration
+from rclpy.qos import qos_profile_sensor_data
+from std_srvs.srv import Trigger
+
+
+def parser():
+    result = argparse.ArgumentParser(description='Franka 位姿规划：位置单位米，四元数顺序 xyzw')
+    result.add_argument('--node', default='/franka_pose_target', help='控制节点完整名称')
+    result.add_argument('--frame', default='base', help='目标坐标系')
+    result.add_argument('--state-topic', default='/franka_robot_state_broadcaster/current_pose')
+    result.add_argument('--timeout', type=float, default=5.0, help='通信等待秒数')
+    commands = result.add_subparsers(dest='command', required=True)
+    for name, description in [('ptp', '普通点到点规划'), ('line', '直线规划')]:
+        command = commands.add_parser(name, help=description)
+        command.add_argument('xyz', nargs=3, type=float, metavar='XYZ', help='依次输入 X Y Z')
+        command.add_argument('--quat', nargs=4, type=float, metavar=('QX', 'QY', 'QZ', 'QW'),
+                             help='省略时保持当前实测姿态')
+        command.add_argument('--relative', action='store_true', help='XYZ 为基坐标系下的相对位移')
+    for name, description in [('home', '只规划回 Home'), ('execute', '执行缓存轨迹'),
+                              ('stop', '请求停止并清除缓存')]:
+        commands.add_parser(name, help=description)
+    return result
+
+
+def wait_until(node, predicate, timeout):
+    deadline = time.monotonic() + timeout
+    while rclpy.ok() and time.monotonic() < deadline:
+        if predicate():
+            return True
+        rclpy.spin_once(node, timeout_sec=0.05)
+    return predicate()
+
+
+def run(node, args):
+    prefix = args.node.rstrip('/')
+    if args.command in ('line', 'ptp', 'home'):
+        ready = node.create_client(Trigger, prefix + '/planning_ready')
+        deadline = time.monotonic() + args.timeout
+        print('等待控制节点发现 MoveIt 规划接口……', flush=True)
+        if not ready.wait_for_service(timeout_sec=args.timeout):
+            raise RuntimeError('规划就绪服务不可用；请重新编译并重启位姿控制节点')
+        while time.monotonic() < deadline:
+            future = ready.call_async(Trigger.Request())
+            remaining = max(0.0, deadline - time.monotonic())
+            if not wait_until(node, future.done, remaining):
+                ready.remove_pending_request(future)
+                break
+            if future.result().success:
+                break
+            rclpy.spin_once(node, timeout_sec=0.1)
+        else:
+            raise RuntimeError('MoveIt 规划接口未就绪；请检查 MoveIt launch，目标未发送')
+        if not future.done() or not future.result().success:
+            raise RuntimeError('等待规划接口超时，目标未发送')
+
+    if args.command in ('home', 'execute', 'stop'):
+        service = 'plan_home' if args.command == 'home' else args.command
+        client = node.create_client(Trigger, prefix + '/' + service)
+        if not client.wait_for_service(timeout_sec=args.timeout):
+            raise RuntimeError('控制服务不可用，请先启动 pose_target.launch.py')
+        future = client.call_async(Trigger.Request())
+        if not wait_until(node, future.done, args.timeout):
+            raise RuntimeError('服务响应超时，结果未知；请查看节点日志，不要盲目重复 execute')
+        response = future.result()
+        print(response.message)
+        return 0 if response.success else 1
+
+    values = args.xyz + (args.quat or [])
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError('位置和四元数必须为有限数值')
+    if args.quat and math.hypot(*args.quat) < 1e-6:
+        raise ValueError('四元数不能为零')
+
+    topic = prefix + ('/linear_target_pose' if args.command == 'line' else '/target_pose')
+    publisher = node.create_publisher(PoseStamped, topic, 1)
+    if not wait_until(node, lambda: publisher.get_subscription_count() > 0, args.timeout):
+        raise RuntimeError('没有目标订阅者，请先启动 pose_target.launch.py')
+
+    target = PoseStamped()
+    target.header.frame_id = args.frame
+    if args.relative or args.quat is None:
+        measured = []
+
+        def receive(message):
+            age = (node.get_clock().now().nanoseconds -
+                   (message.header.stamp.sec * 10**9 + message.header.stamp.nanosec)) / 1e9
+            pose = message.pose
+            values = [pose.position.x, pose.position.y, pose.position.z,
+                      pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w]
+            if (message.header.frame_id == args.frame and 0 <= age <= 1.0 and
+                    all(math.isfinite(value) for value in values) and
+                    math.hypot(*values[3:]) >= 1e-6):
+                measured[:] = [message]
+
+        subscription = node.create_subscription(PoseStamped, args.state_topic, receive,
+                                                qos_profile_sensor_data)
+        if not wait_until(node, lambda: bool(measured), args.timeout):
+            raise RuntimeError('未收到同坐标系下的新鲜有效 TCP 位姿')
+        target.pose = copy.deepcopy(measured[0].pose)
+        node.destroy_subscription(subscription)
+
+    for axis, value in zip(('x', 'y', 'z'), args.xyz):
+        base = getattr(target.pose.position, axis) if args.relative else 0.0
+        setattr(target.pose.position, axis, base + value)
+    if args.quat is not None:
+        norm = math.hypot(*args.quat)
+        for axis, value in zip(('x', 'y', 'z', 'w'), args.quat):
+            setattr(target.pose.orientation, axis, value / norm)
+    target.header.stamp = node.get_clock().now().to_msg()
+    publisher.publish(target)
+    if not publisher.wait_for_all_acked(Duration(seconds=args.timeout)):
+        raise RuntimeError('目标传输确认超时；请查看控制节点日志')
+    p = target.pose.position
+    print(f'已发送规划目标 ({p.x:.6f}, {p.y:.6f}, {p.z:.6f})，坐标系 {args.frame}。')
+    print('发送成功不代表规划成功。请查看节点日志和 RViz，确认后运行 pose execute。')
+    return 0
+
+
+def main():
+    args = parser().parse_args()
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        raise SystemExit('--timeout 必须是有限正数')
+    rclpy.init(args=[])
+    node = rclpy.create_node('franka_pose_cli')
+    try:
+        return run(node, args)
+    except KeyboardInterrupt:
+        return 130
+    except Exception as error:
+        print(f'错误：{error}')
+        return 1
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
