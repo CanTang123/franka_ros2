@@ -1,5 +1,8 @@
 # ROS 2 Integration for Franka Robotics Research Robots
 
+**FR3 实机测试中文入口：[回起点、四方法运行、停止与记录作图](README_FR3_实机测试.md)。**
+完整部署包包含 `local_models/` 权重；运行 `bash tools/fr3_comparison/fr3_test.sh help` 查看命令。
+
 [![CI](https://github.com/frankarobotics/franka_ros2/actions/workflows/ci.yml/badge.svg)](https://github.com/frankarobotics/franka_ros2/actions/workflows/ci.yml)
 
 > **Note:** _franka_ros2_ is not officially supported on Windows.

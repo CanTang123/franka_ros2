@@ -29,3 +29,5 @@ __pycache__/
 # Local comparison records and validation logs; transfer separately from source.
 /comparison_data/
 /comparison_validation/
+/experiment_logs/
+/local_models/

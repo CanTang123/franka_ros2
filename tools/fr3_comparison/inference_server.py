@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Loopback JSON inference service; use an SSH tunnel from the robot computer."""
+"""Loopback JSON inference service, normally on the same computer as ROS."""
 import argparse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
@@ -11,13 +11,14 @@ from protocol import SCHEMA, JOINTS
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--project", required=True)
-    parser.add_argument("--frozen-manifest", required=True)
-    parser.add_argument("--extension", required=True)
+    parser.add_argument("--bundle", type=Path, help="Portable local model/data/source payload")
+    parser.add_argument("--project")
+    parser.add_argument("--frozen-manifest")
+    parser.add_argument("--extension")
     parser.add_argument("--trial", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    runtime = Runtime(args.project, args.frozen_manifest, args.extension)
+    runtime = Runtime(args.project, args.frozen_manifest, args.extension, bundle=args.bundle)
     trial = json.loads(args.trial.read_text())
     warmup = dict(schema=SCHEMA, joint_names=JOINTS, request_id=0, source=trial["source"],
                   control_step=0, condition_id=trial["condition_id"], descriptor=trial["path_descriptor"],
@@ -53,10 +54,11 @@ def main():
                 self.wfile.write(data)
             except (BrokenPipeError, ConnectionResetError):
                 pass
-    print(json.dumps({"ready": True, "bind": f"127.0.0.1:{args.port}",
+    server = HTTPServer(("127.0.0.1", args.port), Handler)
+    print(json.dumps({"ready": True, "bind": f"127.0.0.1:{args.port}", "device_info": runtime.device_info,
                       "methods": list("ABCD"), "checkpoints": runtime.checkpoints,
                       "source_hashes": runtime.source_hashes}), flush=True)
-    HTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+    server.serve_forever()
 
 
 if __name__ == "__main__":

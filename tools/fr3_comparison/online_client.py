@@ -6,6 +6,8 @@ import json
 import math
 from pathlib import Path
 import signal
+import subprocess
+import sys
 import time
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
@@ -19,6 +21,7 @@ from control_msgs.msg import JointTolerance
 from controller_manager_msgs.srv import ListControllers
 from moveit_msgs.srv import GetStateValidity
 from sensor_msgs.msg import JointState
+from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -42,9 +45,15 @@ class Client(Node):
         self.goal_futures = []
         self.awaiting_acceptance = None
         self.generation = 0
+        self.run_id = 0
+        self.recording_until = None
+        self.ee = None
+        self.report_processes = []
         self.pool = ThreadPoolExecutor(max_workers=1)
+        args.log.parent.mkdir(parents=True, exist_ok=True)
         self.log = args.log.open("x", buffering=1)
         self.create_subscription(JointState, args.joint_states, self.on_state, qos_profile_sensor_data)
+        self.create_subscription(PoseStamped, args.ee_pose, self.on_ee_pose, qos_profile_sensor_data)
         self.create_subscription(String, args.robot_description, self.on_description,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.preview = self.create_publisher(JointTrajectory, "~/reference_trajectory", 1)
@@ -60,7 +69,52 @@ class Client(Node):
 
     def record(self, event, **values):
         self.log.write(json.dumps(dict(event=event, monotonic_s=time.monotonic(),
-            ros_time_ns=self.get_clock().now().nanoseconds, **values), default=str, allow_nan=False) + "\n")
+            ros_time_ns=self.get_clock().now().nanoseconds, run_id=self.run_id, **values), default=str, allow_nan=False) + "\n")
+
+    def recording(self):
+        return self.enabled or (self.recording_until is not None and time.monotonic() <= self.recording_until)
+
+    def on_ee_pose(self, msg):
+        p, q = msg.pose.position, msg.pose.orientation
+        values = [p.x, p.y, p.z, q.x, q.y, q.z, q.w]
+        stamp = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
+        try:
+            vector(values, 7, "end effector pose")
+            if stamp <= 0 or not msg.header.frame_id or sum(v * v for v in values[3:]) < 1e-12:
+                raise ValueError("Missing EE timestamp/frame or invalid quaternion")
+            if self.ee is not None and stamp <= self.ee["stamp_ns"]:
+                return
+            self.ee = dict(position_m=values[:3], quaternion_xyzw=values[3:],
+                           stamp_ns=stamp, frame_id=msg.header.frame_id,
+                           sample_monotonic_s=time.monotonic())
+            if self.recording():
+                self.record("measured_ee", **self.ee)
+        except ValueError as error:
+            if self.recording():
+                self.record("telemetry_rejected", topic=self.args.ee_pose, reason=str(error))
+
+    def finish_recording(self):
+        if self.recording_until is None:
+            return
+        self.recording_until = None
+        self.record("recording_complete")
+        self.log.flush()
+        if self.args.no_auto_report:
+            return
+        root = self.args.log.with_name(self.args.log.stem + "_reports")
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            out = root / f"run_{self.run_id:03d}"
+            report_log = root / f"run_{self.run_id:03d}_report.log"
+            with report_log.open("x") as handle:
+                process = subprocess.Popen([sys.executable,
+                    str(Path(__file__).with_name("report_results.py")), str(self.args.log.resolve()),
+                    "--run-id", str(self.run_id), "--output", str(out.resolve())],
+                    stdout=handle, stderr=subprocess.STDOUT)
+            self.report_processes.append(process)
+            self.get_logger().info(f"Recording saved; generating report in {out} (log: {report_log})")
+        except (OSError, ValueError) as error:
+            self.get_logger().warning(f"Automatic report failed; raw data is saved: {error}")
 
     def on_description(self, msg):
         try:
@@ -89,8 +143,8 @@ class Client(Node):
             if self.state_stamp is not None and stamp <= self.state_stamp:
                 return  # Repeated/out-of-order messages cannot refresh freshness.
             self.state, self.received, self.state_stamp = state, time.monotonic(), stamp
-            if self.enabled:
-                self.record("measured_state", state=state, stamp_ns=stamp)
+            if self.recording():
+                self.record("measured_state", state=state, stamp_ns=stamp, sample_monotonic_s=self.received)
         except (ValueError, IndexError) as error:
             self.stop(f"joint_states: {error}")
 
@@ -111,7 +165,7 @@ class Client(Node):
             res.success = True
             return res
         try:
-            if self.enabled or self.pending is not None or any(not f.done() for f in self.goal_futures):
+            if self.enabled or self.recording_until is not None or self.pending is not None or any(not f.done() for f in self.goal_futures):
                 raise ValueError("Busy; wait for pending operations to finish")
             state = self.fresh_state()
             if self.limits is None:
@@ -125,10 +179,16 @@ class Client(Node):
             if self.args.execute and (not self.action.server_is_ready() or not self.controllers.service_is_ready()):
                 raise ValueError("Controller action/list_controllers unavailable")
             self.enabled = True
+            self.run_id += 1
             self.generation += 1
             self.started = self.next_request = time.monotonic()
             self.control_step = 0
             self.record("enabled")
+            self.record("measured_state", state=state, stamp_ns=self.state_stamp, sample_monotonic_s=self.received)
+            if self.ee is not None and time.monotonic() - self.ee["sample_monotonic_s"] <= self.args.state_timeout:
+                self.record("measured_ee", **self.ee)
+            else:
+                self.record("telemetry_missing", topic=self.args.ee_pose, reason="No fresh EE pose at enable")
             res.success, res.message = True, "Enabled" if self.args.execute else "Enabled dry-run"
         except ValueError as error:
             res.success, res.message = False, str(error)
@@ -148,6 +208,7 @@ class Client(Node):
             self.goal = None
         if was_enabled:
             self.record("stopped", reason=reason)
+            self.recording_until = time.monotonic() + self.args.post_stop_seconds
             self.get_logger().warning(reason)
 
     def http_plan(self, value):
@@ -168,6 +229,8 @@ class Client(Node):
     def step(self):
         now = time.monotonic()
         if not self.enabled:
+            if self.recording_until is not None and now >= self.recording_until:
+                self.finish_recording()
             if self.pending and self.pending["future"].done():
                 self.pending = None
             return
@@ -254,7 +317,22 @@ class Client(Node):
         goal.path_tolerance = [JointTolerance(name=j, position=self.args.tracking_tolerance) for j in JOINTS]
         epoch = self.generation
         self.goal_sequence = sequence
-        future = self.action.send_goal_async(goal)
+        def feedback(msg):
+            if epoch != self.generation or not self.recording():
+                return
+            data = msg.feedback
+            try:
+                ids = [data.joint_names.index(name) for name in JOINTS]
+                values = {}
+                for name in ("desired", "actual", "error"):
+                    point = getattr(data, name)
+                    positions = [point.positions[i] for i in ids]
+                    vector(positions, 7, name)
+                    values[name + "_q_rad"] = positions
+                self.record("controller_feedback", sequence=sequence, **values)
+            except (ValueError, IndexError) as error:
+                self.record("telemetry_rejected", topic="controller_feedback", reason=str(error))
+        future = self.action.send_goal_async(goal, feedback_callback=feedback)
         self.goal_futures.append(future)
         sent = time.monotonic()
         self.awaiting_acceptance = sequence, sent
@@ -296,6 +374,9 @@ def main():
     parser.add_argument("--trial", type=Path, required=True)
     parser.add_argument("--method", choices=list("ABCD"), required=True)
     parser.add_argument("--log", type=Path, required=True, help="New JSONL log file")
+    parser.add_argument("--ee-pose", default="/franka_robot_state_broadcaster/current_pose")
+    parser.add_argument("--post-stop-seconds", type=float, default=1., help="Record stopping motion after disabling")
+    parser.add_argument("--no-auto-report", action="store_true", help="Save raw data; generate CSV/plots manually later")
     parser.add_argument("--server", default="http://127.0.0.1:8765")
     parser.add_argument("--execute", action="store_true", help="Allow controller commands after explicit enable")
     parser.add_argument("--joint-states", default="/joint_states")
@@ -316,7 +397,11 @@ def main():
             parser.error(f"{key} must be finite and positive")
     if args.plan_timeout >= .2:
         parser.error("plan_timeout must be below the 0.2s replanning period")
+    if not math.isfinite(args.post_stop_seconds) or not 0 <= args.post_stop_seconds <= 10:
+        parser.error("post_stop_seconds must be within [0, 10]")
     # Keep ROS alive long enough to request action cancellation on shutdown.
+    from home_checks import ControlLease
+    lease = ControlLease(args.controller)
     from rclpy.signals import SignalHandlerOptions
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     node = Client(args)
@@ -331,13 +416,22 @@ def main():
             rclpy.spin_once(node, timeout_sec=.02)
     finally:
         node.stop("process shutdown")
-        deadline = time.monotonic() + 2.
-        while rclpy.ok() and time.monotonic() < deadline and any(not f.done() for f in node.goal_futures):
+        deadline = time.monotonic() + max(2., args.post_stop_seconds + .1)
+        while rclpy.ok() and time.monotonic() < deadline and (node.recording_until is not None or any(not f.done() for f in node.goal_futures)):
             rclpy.spin_once(node, timeout_sec=.02)
+        node.finish_recording()
         node.pool.shutdown(wait=True, cancel_futures=True)
         node.log.close()
         node.destroy_node()
         rclpy.shutdown()
+        lease.close()
+        for process in node.report_processes:
+            try:
+                process.wait(timeout=30)
+                if process.returncode:
+                    print("Report generation failed; see *_report.log. Raw JSONL is preserved.", file=sys.stderr)
+            except subprocess.TimeoutExpired:
+                print("Report generation is still running; see *_reports/.", file=sys.stderr)
 
 
 if __name__ == "__main__":

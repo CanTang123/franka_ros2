@@ -14,9 +14,10 @@ from protocol import SCHEMA, JOINTS, response
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--project", required=True)
-    p.add_argument("--frozen-manifest", required=True)
-    p.add_argument("--extension", required=True)
+    p.add_argument("--bundle", type=Path)
+    p.add_argument("--project")
+    p.add_argument("--frozen-manifest")
+    p.add_argument("--extension")
     p.add_argument("--trial", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--port", type=int, default=18765)
@@ -30,8 +31,11 @@ def main():
                              headers={"Content-Type": "application/json"}), timeout=1.) as handle:
             return json.load(handle)
     cmd = [sys.executable, str(Path(__file__).with_name("inference_server.py")),
-           "--project", args.project, "--frozen-manifest", args.frozen_manifest,
-           "--extension", args.extension, "--trial", str(args.trial), "--port", str(args.port)]
+           "--trial", str(args.trial), "--port", str(args.port)]
+    if args.bundle:
+        cmd += ["--bundle", str(args.bundle)]
+    else:
+        cmd += ["--project", args.project, "--frozen-manifest", args.frozen_manifest, "--extension", args.extension]
     with args.output.with_suffix(".server.log").open("x") as log:
         process = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
         try:
@@ -62,7 +66,8 @@ def main():
             else:
                 raise AssertionError("Server accepted the wrong trial")
             report = dict(passed=True, rows=rows, wrong_trial_rejected=True,
-                          scope="CPU loopback HTTP; no SSH/WAN/ROS/hardware verification")
+                          device_info=result["device_info"],
+                          scope="Loopback HTTP; no SSH/WAN/ROS/hardware verification")
             with args.output.open("x") as file:
                 json.dump(report, file, indent=2)
             print(json.dumps(report))

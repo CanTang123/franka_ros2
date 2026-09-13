@@ -20,6 +20,7 @@ def loaded_client():
         "control_msgs.action": {"FollowJointTrajectory": types.SimpleNamespace(Goal=types.SimpleNamespace)},
         "control_msgs.msg": {"JointTolerance": types.SimpleNamespace},
         "controller_manager_msgs.srv": {"ListControllers": object},
+        "geometry_msgs.msg": {"PoseStamped": object},
         "moveit_msgs.srv": {"GetStateValidity": object}, "sensor_msgs.msg": {"JointState": object},
         "std_msgs.msg": {"String": object}, "std_srvs.srv": {"SetBool": object, "Trigger": object},
         "trajectory_msgs.msg": {"JointTrajectory": object, "JointTrajectoryPoint": object},
@@ -61,7 +62,9 @@ class ClientFailureTests(unittest.TestCase):
         node.goal_sequence = None
         node.goal_futures = []
         node.awaiting_acceptance = None
-        node.args = types.SimpleNamespace(plan_timeout=.15, tracking_tolerance=.1)
+        node.recording_until = None
+        node.args = types.SimpleNamespace(
+            plan_timeout=.15, tracking_tolerance=.1, post_stop_seconds=1.)
         node.started = time.monotonic()
         node.trial = {"duration_s": 8.8}
         node.record = lambda *a, **kw: None
@@ -91,7 +94,8 @@ class ClientFailureTests(unittest.TestCase):
     def test_stop_before_goal_acceptance_cancels_late_goal(self):
         node = self.make()
         accepted = Future()
-        node.action = types.SimpleNamespace(send_goal_async=lambda goal: accepted)
+        node.action = types.SimpleNamespace(
+            send_goal_async=lambda goal, feedback_callback=None: accepted)
         node.send_goal(object(), 10)
         node.stop("operator")
         late = Handle()
@@ -119,7 +123,8 @@ class ClientFailureTests(unittest.TestCase):
         node = self.make()
         accepted = Future()
         result = Future()
-        node.action = types.SimpleNamespace(send_goal_async=lambda goal: accepted)
+        node.action = types.SimpleNamespace(
+            send_goal_async=lambda goal, feedback_callback=None: accepted)
         node.send_goal(object(), 10)
         handle = Handle()
         handle.get_result_async = lambda: result
