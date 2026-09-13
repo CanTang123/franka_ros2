@@ -13,6 +13,7 @@
 
   <depend>builtin_interfaces</depend>
   <depend>geometry_msgs</depend>
+  <depend>franka_msgs</depend>
   <depend>moveit_core</depend>
   <depend>moveit_msgs</depend>
   <depend>rclcpp</depend>

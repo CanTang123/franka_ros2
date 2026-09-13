@@ -28,6 +28,7 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(realtime_tools REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(Eigen3 REQUIRED)
 
@@ -73,6 +74,7 @@ ament_target_dependencies(
         rclcpp
         rclcpp_lifecycle
         realtime_tools
+        sensor_msgs
         std_srvs
 )
 
@@ -149,6 +151,13 @@ if(BUILD_TESTING)
     ament_target_dependencies(${PROJECT_NAME}_load_all_test
         controller_manager
         ros2_control_test_assets
+    )
+
+    ament_add_gmock(${PROJECT_NAME}_damped_pseudo_inverse_test
+        test/test_damped_pseudo_inverse.cpp)
+    target_include_directories(${PROJECT_NAME}_damped_pseudo_inverse_test PRIVATE
+        include
+        ${EIGEN3_INCLUDE_DIRS}
     )
 
     if(CHECK_TIDY)

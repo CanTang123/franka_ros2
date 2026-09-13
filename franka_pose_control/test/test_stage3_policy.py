@@ -46,6 +46,34 @@ def test_action_processing_preserves_previous_component_clipped_action(
     np.testing.assert_allclose(delta, np.asarray((1.0, -1.0)) / np.sqrt(2.0) * 0.001)
 
 
+def test_reference_advance_accumulates_and_limits_tcp_lead(
+    contract: DeploymentContract,
+) -> None:
+    tcp = np.asarray((0.45, 0.0))
+    reference = tcp.copy()
+    delta = np.asarray((0.003, 0.004))
+
+    reference = contract.advance_reference(reference, tcp, delta, 0.015)
+    np.testing.assert_allclose(reference, (0.453, 0.004))
+    reference = contract.advance_reference(reference, tcp, delta, 0.015)
+    np.testing.assert_allclose(reference, (0.456, 0.008))
+    reference = contract.advance_reference(reference, tcp, delta, 0.015)
+    np.testing.assert_allclose(reference, (0.459, 0.012))
+    reference = contract.advance_reference(reference, tcp, delta, 0.015)
+    np.testing.assert_allclose(np.linalg.norm(reference - tcp), 0.015)
+
+
+def test_reference_advance_respects_action_workspace(contract: DeploymentContract) -> None:
+    reference = np.asarray((contract.action_workspace_x[1], contract.action_workspace_y[1]))
+    advanced = contract.advance_reference(
+        reference,
+        reference,
+        np.asarray((0.01, 0.01)),
+        0.015,
+    )
+    np.testing.assert_allclose(advanced, reference)
+
+
 def test_waypoint_planner_uses_target_for_clear_path(contract: DeploymentContract) -> None:
     plan = WaypointPlanner(contract).plan(
         np.asarray((0.4, -0.1)), np.asarray((0.6, -0.1)), np.asarray((0.5, 0.1)), 0.04, True

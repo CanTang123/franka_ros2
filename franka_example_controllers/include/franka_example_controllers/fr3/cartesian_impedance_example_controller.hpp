@@ -23,8 +23,10 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/time.hpp>
 #include <realtime_tools/realtime_buffer.hpp>
+#include <realtime_tools/realtime_publisher.hpp>
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "sensor_msgs/msg/joint_state.hpp"
 
 #include <controller_interface/controller_interface.hpp>
 #include <franka_msgs/srv/set_cartesian_stiffness.hpp>
@@ -84,6 +86,7 @@ class CartesianImpedanceExampleController : public controller_interface::Control
 
   double filter_params_{0.005};
   bool external_target_mode_{false};
+  bool publish_diagnostics_{false};
   std::string equilibrium_pose_frame_{"base"};
 
   Eigen::Matrix<double, num_cartesian_dof, num_cartesian_dof> cartesian_stiffness_;
@@ -102,8 +105,14 @@ class CartesianImpedanceExampleController : public controller_interface::Control
   realtime_tools::RealtimeBuffer<double> nullspace_stiffness_buffer_;
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_equilibrium_pose_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr accepted_target_publisher_;
+  std::shared_ptr<realtime_tools::RealtimePublisher<geometry_msgs::msg::PoseStamped>>
+      internal_target_publisher_;
+  std::shared_ptr<realtime_tools::RealtimePublisher<sensor_msgs::msg::JointState>>
+      commanded_torque_publisher_;
   rclcpp::Service<franka_msgs::srv::SetCartesianStiffness>::SharedPtr srv_set_cartesian_stiffness_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
+  size_t diagnostic_publish_counter_{0};
 
   /// @brief Callback for incoming equilibrium pose messages.
   /// @param msg New target pose message.

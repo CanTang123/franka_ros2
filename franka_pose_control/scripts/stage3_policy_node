@@ -15,6 +15,7 @@ from franka_pose_control_policy.stage3_policy import (
     WaypointPlan,
     WaypointPlanner,
 )
+from franka_msgs.msg import FrankaRobotState
 from geometry_msgs.msg import Pose, PoseStamped
 import numpy as np
 import rclpy
@@ -60,6 +61,9 @@ class Stage3PolicyNode(Node):
             'joint_state_topic', '/franka_robot_state_broadcaster/measured_joint_states'
         )
         self.declare_parameter(
+            'robot_state_topic', '/franka_robot_state_broadcaster/robot_state'
+        )
+        self.declare_parameter(
             'controller_target_topic', '/cartesian_impedance_policy_controller/equilibrium_pose'
         )
         self.declare_parameter('expected_frame', 'base')
@@ -68,7 +72,9 @@ class Stage3PolicyNode(Node):
         self.declare_parameter('auto_enable', False)
         self.declare_parameter('state_timeout_s', 0.10)
         self.declare_parameter('max_reference_step_m', 0.001)
+        self.declare_parameter('max_reference_lead_m', 0.015)
         self.declare_parameter('max_joint_velocity_rad_s', 0.6)
+        self.declare_parameter('min_control_command_success_rate', 0.8)
         self.declare_parameter('forbidden_stop_margin_m', 0.005)
         self.declare_parameter('target_height_tolerance_m', 0.005)
         self.declare_parameter('target_orientation_tolerance_rad', math.radians(5.0))
@@ -83,22 +89,36 @@ class Stage3PolicyNode(Node):
         self.dry_run = bool(self.get_parameter('dry_run').value)
         self.state_timeout = float(self.get_parameter('state_timeout_s').value)
         self.max_reference_step = float(self.get_parameter('max_reference_step_m').value)
+        self.max_reference_lead = float(self.get_parameter('max_reference_lead_m').value)
         self.max_joint_velocity = float(self.get_parameter('max_joint_velocity_rad_s').value)
+        self.min_control_success_rate = float(
+            self.get_parameter('min_control_command_success_rate').value
+        )
         self.forbidden_stop_margin = float(self.get_parameter('forbidden_stop_margin_m').value)
         if not 0.0 < self.max_reference_step <= self.contract.model_max_step:
             raise ValueError(
                 f'max_reference_step_m must be in (0, {self.contract.model_max_step}]'
             )
+        if not self.max_reference_step <= self.max_reference_lead <= self.contract.model_max_step:
+            raise ValueError(
+                'max_reference_lead_m must be between max_reference_step_m and '
+                f'{self.contract.model_max_step}'
+            )
 
         self.joint_position: np.ndarray | None = None
         self.joint_velocity: np.ndarray | None = None
         self.joint_state_time = None
+        self.robot_state_time = None
+        self.robot_mode: int | None = None
+        self.control_success_rate = 0.0
+        self.active_robot_errors: tuple[str, ...] = ()
         self.tcp_pose: np.ndarray | None = None
         self.tcp_speed = 0.0
         self.pose_time = None
         self.previous_tcp_position: np.ndarray | None = None
         self.previous_pose_time = None
         self.previous_action = np.zeros(2, dtype=np.float32)
+        self.reference_xy: np.ndarray | None = None
         self.command: Stage3PolicyCommand | None = None
         self.plan: WaypointPlan | None = None
         self.detour_waypoint_reached = False
@@ -110,12 +130,19 @@ class Stage3PolicyNode(Node):
 
         pose_topic = str(self.get_parameter('current_pose_topic').value)
         joint_topic = str(self.get_parameter('joint_state_topic').value)
+        robot_state_topic = str(self.get_parameter('robot_state_topic').value)
         controller_topic = str(self.get_parameter('controller_target_topic').value)
         self.create_subscription(
             PoseStamped, pose_topic, self._pose_callback, qos_profile_sensor_data
         )
         self.create_subscription(
             JointState, joint_topic, self._joint_state_callback, qos_profile_sensor_data
+        )
+        self.create_subscription(
+            FrankaRobotState,
+            robot_state_topic,
+            self._robot_state_callback,
+            qos_profile_sensor_data,
         )
         self.create_subscription(Stage3PolicyCommand, '~/command', self._command_callback, 10)
         self.controller_publisher = self.create_publisher(PoseStamped, controller_topic, 10)
@@ -132,7 +159,8 @@ class Stage3PolicyNode(Node):
             raise ValueError('auto_enable is only permitted in dry-run mode')
         self.get_logger().info(
             f'Loaded Stage 3 policy; dry_run={self.dry_run}, '
-            f'max_reference_step={self.max_reference_step:.4f} m'
+            f'max_reference_step={self.max_reference_step:.4f} m, '
+            f'max_reference_lead={self.max_reference_lead:.4f} m'
         )
 
     def _make_pose(self, height: float, orientation: np.ndarray) -> Pose:
@@ -190,6 +218,19 @@ class Stage3PolicyNode(Node):
         self.joint_position = position
         self.joint_velocity = velocity
         self.joint_state_time = self.get_clock().now()
+
+    def _robot_state_callback(self, message: FrankaRobotState) -> None:
+        self.robot_state_time = self.get_clock().now()
+        self.robot_mode = int(message.robot_mode)
+        self.control_success_rate = float(message.control_command_success_rate)
+        error_fields = message.current_errors.get_fields_and_field_types()
+        self.active_robot_errors = tuple(
+            name for name in error_fields if bool(getattr(message.current_errors, name))
+        )
+        if self.active_robot_errors:
+            self._disarm('robot error: ' + ', '.join(self.active_robot_errors))
+        elif self.robot_mode != FrankaRobotState.ROBOT_MODE_MOVE:
+            self._disarm(f'robot mode is {self.robot_mode}, expected MOVE')
 
     def _command_callback(self, message: Stage3PolicyCommand) -> None:
         if self.tcp_pose is None:
@@ -253,6 +294,7 @@ class Stage3PolicyNode(Node):
             return
         self.command = message
         self.plan = plan
+        self.reference_xy = self.tcp_pose[:2].copy()
         self.detour_waypoint_reached = False
         self.previous_action.fill(0.0)
         self.detail = 'command accepted'
@@ -277,6 +319,22 @@ class Stage3PolicyNode(Node):
             or (now - self.joint_state_time).nanoseconds * 1.0e-9 > self.state_timeout
         ):
             return False, 'joint state is stale'
+        if (
+            self.robot_state_time is None
+            or (now - self.robot_state_time).nanoseconds * 1.0e-9 > self.state_timeout
+        ):
+            return False, 'full robot state is stale'
+        if self.active_robot_errors:
+            return False, 'robot error: ' + ', '.join(self.active_robot_errors)
+        if self.robot_mode != FrankaRobotState.ROBOT_MODE_MOVE:
+            return False, f'robot mode is {self.robot_mode}, expected MOVE'
+        if self.control_success_rate < self.min_control_success_rate:
+            return (
+                False,
+                'control command success rate '
+                f'{self.control_success_rate:.3f} is below '
+                f'{self.min_control_success_rate:.3f}',
+            )
         if float(np.max(np.abs(self.joint_velocity))) > self.max_joint_velocity:
             return False, 'joint velocity exceeds deployment limit'
         if (
@@ -325,6 +383,7 @@ class Stage3PolicyNode(Node):
             response.message = 'Cartesian impedance controller is not subscribed'
             return response
         self.armed = True
+        self.reference_xy = self.tcp_pose[:2].copy()
         self.detail = 'armed in dry-run mode' if self.dry_run else 'armed'
         response.success = True
         response.message = self.detail
@@ -343,6 +402,7 @@ class Stage3PolicyNode(Node):
         if self.armed:
             self.get_logger().error(f'Policy disarmed: {reason}')
         self.armed = False
+        self.reference_xy = None
         self.detail = reason
 
     def _policy_step(self) -> None:
@@ -369,6 +429,8 @@ class Stage3PolicyNode(Node):
         if self.plan.direct_path_blocked and not self.detour_waypoint_reached:
             distance = float(np.linalg.norm(self.tcp_pose[:2] - self.plan.waypoint_xy))
             self.detour_waypoint_reached = distance <= self.contract.waypoint_switch_distance
+            if self.detour_waypoint_reached:
+                self.reference_xy = self.tcp_pose[:2].copy()
         use_detour = self.plan.direct_path_blocked and not self.detour_waypoint_reached
         active_waypoint = self.plan.waypoint_xy if use_detour else target[:2]
         observation = self.contract.build_observation(
@@ -387,9 +449,15 @@ class Stage3PolicyNode(Node):
             raw_action, self.max_reference_step
         )
         self.previous_action = previous_action
-        reference_xy = self.tcp_pose[:2] + delta_xy
-        reference_xy[0] = np.clip(reference_xy[0], *self.contract.action_workspace_x)
-        reference_xy[1] = np.clip(reference_xy[1], *self.contract.action_workspace_y)
+        if self.reference_xy is None:
+            self.reference_xy = self.tcp_pose[:2].copy()
+        self.reference_xy = self.contract.advance_reference(
+            self.reference_xy,
+            self.tcp_pose[:2],
+            delta_xy,
+            self.max_reference_lead,
+        )
+        reference_xy = self.reference_xy
         reference = self._make_pose(
             self.contract.target_height, self.contract.target_orientation_xyzw
         )

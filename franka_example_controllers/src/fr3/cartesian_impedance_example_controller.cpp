@@ -14,6 +14,8 @@
 
 #include "franka_example_controllers/fr3/cartesian_impedance_example_controller.hpp"
 
+#include "franka_example_controllers/damped_pseudo_inverse.hpp"
+
 #include <cassert>
 
 namespace franka_example_controllers {
@@ -37,6 +39,7 @@ CartesianImpedanceExampleController::CallbackReturn CartesianImpedanceExampleCon
     auto_declare<double>("translational_stiffness", 150.0);
     auto_declare<double>("rotational_stiffness", 10.0);
     auto_declare<bool>("external_target_mode", false);
+    auto_declare<bool>("publish_diagnostics", false);
     auto_declare<std::string>("equilibrium_pose_frame", "base");
   } catch (const std::exception& e) {
     fprintf(stderr, "Exception thrown during init stage with message: %s \n", e.what());
@@ -99,6 +102,7 @@ CartesianImpedanceExampleController::on_configure(
   const double r_k = get_node()->get_parameter("rotational_stiffness").as_double();
   const double n_k = get_node()->get_parameter("nullspace_stiffness").as_double();
   external_target_mode_ = get_node()->get_parameter("external_target_mode").as_bool();
+  publish_diagnostics_ = get_node()->get_parameter("publish_diagnostics").as_bool();
   equilibrium_pose_frame_ = get_node()->get_parameter("equilibrium_pose_frame").as_string();
 
   CartesianGains gains = buildGains({t_k, t_k, t_k, r_k, r_k, r_k});
@@ -114,6 +118,26 @@ CartesianImpedanceExampleController::on_configure(
       "~/equilibrium_pose", rclcpp::SystemDefaultsQoS(),
       std::bind(&CartesianImpedanceExampleController::equilibriumPoseCallback, this,
                 std::placeholders::_1));
+
+  if (publish_diagnostics_) {
+    accepted_target_publisher_ = get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
+        "~/accepted_equilibrium_pose", rclcpp::SystemDefaultsQoS());
+    internal_target_publisher_ =
+        std::make_shared<realtime_tools::RealtimePublisher<geometry_msgs::msg::PoseStamped>>(
+            get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
+                "~/internal_equilibrium_pose", rclcpp::SystemDefaultsQoS()));
+    commanded_torque_publisher_ =
+        std::make_shared<realtime_tools::RealtimePublisher<sensor_msgs::msg::JointState>>(
+            get_node()->create_publisher<sensor_msgs::msg::JointState>(
+                "~/commanded_joint_torques", rclcpp::SystemDefaultsQoS()));
+    commanded_torque_publisher_->msg_.name.reserve(num_joints);
+    for (int i = 1; i <= num_joints; ++i) {
+      commanded_torque_publisher_->msg_.name.push_back(arm_id_ + "_joint" + std::to_string(i));
+    }
+    commanded_torque_publisher_->msg_.position.resize(num_joints);
+    commanded_torque_publisher_->msg_.velocity.resize(num_joints);
+    commanded_torque_publisher_->msg_.effort.resize(num_joints);
+  }
 
   srv_set_cartesian_stiffness_ =
       get_node()->create_service<franka_msgs::srv::SetCartesianStiffness>(
@@ -175,7 +199,7 @@ void CartesianImpedanceExampleController::readJointState() {
 }
 
 controller_interface::return_type CartesianImpedanceExampleController::update(
-    const rclcpp::Time& /*time*/,
+    const rclcpp::Time& time,
     const rclcpp::Duration& period) {
   readJointState();
 
@@ -207,18 +231,11 @@ controller_interface::return_type CartesianImpedanceExampleController::update(
 
   Eigen::Matrix<double, num_joints, 1> tau_task, tau_nullspace, tau_d;
 
-  // Damped pseudo-inverse of jacobian transpose
-  Eigen::MatrixXd jacobian_transpose_pinv;
-  double lambda = 0.2;
-  Eigen::JacobiSVD<Eigen::MatrixXd> svd(jacobian.transpose(),
-                                        Eigen::ComputeFullU | Eigen::ComputeFullV);
-  Eigen::JacobiSVD<Eigen::MatrixXd>::SingularValuesType sing_vals = svd.singularValues();
-  Eigen::MatrixXd S = jacobian.transpose();
-  S.setZero();
-  for (int i = 0; i < sing_vals.size(); i++) {
-    S(i, i) = sing_vals(i) / (sing_vals(i) * sing_vals(i) + lambda * lambda);
-  }
-  jacobian_transpose_pinv = svd.matrixV() * S.transpose() * svd.matrixU().transpose();
+  // Fixed-size damped pseudo-inverse of J^T. Avoid dynamic allocation and the
+  // variable execution time of a full SVD in the 1 kHz real-time loop.
+  constexpr double kDamping = 0.2;
+  const Eigen::Matrix<double, num_cartesian_dof, num_joints> jacobian_transpose_pinv =
+      dampedPseudoInverseOfTranspose<num_cartesian_dof, num_joints>(jacobian, kDamping);
 
   tau_task << jacobian.transpose() *
                   (-cartesian_stiffness_ * error - cartesian_damping_ * (jacobian * dq_));
@@ -229,6 +246,37 @@ controller_interface::return_type CartesianImpedanceExampleController::update(
                         2.0 * std::sqrt(nullspace_stiffness_) * dq_);
 
   tau_d << tau_task + tau_nullspace + coriolis;
+
+  // Publish low-rate diagnostics through non-blocking real-time publishers.
+  // All variable-length storage is initialized during configure(), so this
+  // path does not allocate in the 1 kHz update loop.
+  if (publish_diagnostics_ && ++diagnostic_publish_counter_ >= 100) {
+    diagnostic_publish_counter_ = 0;
+    if (internal_target_publisher_->trylock()) {
+      auto& message = internal_target_publisher_->msg_;
+      message.header.stamp = time;
+      message.header.frame_id = equilibrium_pose_frame_;
+      message.pose.position.x = position_d_.x();
+      message.pose.position.y = position_d_.y();
+      message.pose.position.z = position_d_.z();
+      message.pose.orientation.x = orientation_d_.x();
+      message.pose.orientation.y = orientation_d_.y();
+      message.pose.orientation.z = orientation_d_.z();
+      message.pose.orientation.w = orientation_d_.w();
+      internal_target_publisher_->unlockAndPublish();
+    }
+    if (commanded_torque_publisher_->trylock()) {
+      auto& message = commanded_torque_publisher_->msg_;
+      message.header.stamp = time;
+      message.header.frame_id = equilibrium_pose_frame_;
+      for (int i = 0; i < num_joints; ++i) {
+        message.position[i] = q_[i];
+        message.velocity[i] = dq_[i];
+        message.effort[i] = tau_d[i];
+      }
+      commanded_torque_publisher_->unlockAndPublish();
+    }
+  }
 
   for (int i = 0; i < num_joints; i++) {
     if (!command_interfaces_[i].set_value(tau_d[i])) {
@@ -306,6 +354,9 @@ void CartesianImpedanceExampleController::equilibriumPoseCallback(
   target.orientation.normalize();
 
   target_pose_buffer_.writeFromNonRT(target);
+  if (publish_diagnostics_) {
+    accepted_target_publisher_->publish(*msg);
+  }
 }
 
 void CartesianImpedanceExampleController::setCartesianStiffnessCallback(

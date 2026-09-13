@@ -8,6 +8,12 @@
     ros__parameters:
       update_rate: 1000
       thread_priority: 97
+      cpu_affinity: 8
+
+      # hardware_synchronization:
+      #   expect_blocking_read_write: true
+      #   minimum_cycle_time: 0.0001
+
       overruns:
         manage: false
         print_warnings: false
@@ -102,6 +108,7 @@
   cartesian_impedance_policy_controller:
     ros__parameters:
       external_target_mode: true
+      publish_diagnostics: false
       equilibrium_pose_frame: base
       translational_stiffness: 150.0
       rotational_stiffness: 10.0
@@ -110,10 +117,18 @@
 /**:
   franka_robot_state_broadcaster:
     ros__parameters:
+      # The Stage 3 policy consumes state at 30 Hz. Keep state publication out
+      # of most 1 kHz torque-control cycles to preserve FCI timing margin.
+      update_rate: 100
       # Publish rate in Hz for convenience topics (current_pose, joint_states, wrenches, etc.).
       # Clamped to this controller's update_rate, which defaults to the controller
       # manager's. The full robot state always publishes at the update rate.
-      convenience_publish_rate: 60
+      convenience_publish_rate: 50
+
+/**:
+  joint_state_broadcaster:
+    ros__parameters:
+      update_rate: 100
 
 /**:
   joint_impedance_with_ik_example_controller:

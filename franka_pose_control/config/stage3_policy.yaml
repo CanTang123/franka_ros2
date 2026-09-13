@@ -2,14 +2,19 @@ fr3_stage3_policy:
   ros__parameters:
     current_pose_topic: /franka_robot_state_broadcaster/current_pose
     joint_state_topic: /franka_robot_state_broadcaster/measured_joint_states
+    robot_state_topic: /franka_robot_state_broadcaster/robot_state
     controller_target_topic: /cartesian_impedance_policy_controller/equilibrium_pose
     expected_frame: base
     policy_rate_hz: 30.0
     dry_run: true
     auto_enable: false
     state_timeout_s: 0.10
-    max_reference_step_m: 0.003
+    max_reference_step_m: 0.01
+    # Accumulate policy increments, but never let the impedance equilibrium
+    # reference lead the measured TCP by more than this distance.
+    max_reference_lead_m: 0.015
     max_joint_velocity_rad_s: 0.6
+    min_control_command_success_rate: 0.8
     forbidden_stop_margin_m: 0.005
     target_height_tolerance_m: 0.005
     target_orientation_tolerance_rad: 0.0872664626

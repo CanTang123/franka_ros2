@@ -172,6 +172,39 @@ class DeploymentContract:
         bounded = previous_action / max(float(np.linalg.norm(previous_action)), 1.0)
         return previous_action, bounded * deployment_max_step
 
+    def advance_reference(
+        self,
+        reference_xy: np.ndarray,
+        tcp_xy: np.ndarray,
+        delta_xy: np.ndarray,
+        max_reference_lead: float,
+    ) -> np.ndarray:
+        """Advance an XY reference while bounding its distance from the measured TCP."""
+        if not 0.0 < max_reference_lead <= self.model_max_step:
+            raise ValueError(
+                f'max_reference_lead must be in (0, {self.model_max_step}]'
+            )
+        reference = np.asarray(reference_xy, dtype=np.float64)
+        tcp = np.asarray(tcp_xy, dtype=np.float64)
+        delta = np.asarray(delta_xy, dtype=np.float64)
+        if reference.shape != (2,) or tcp.shape != (2,) or delta.shape != (2,):
+            raise ValueError('reference_xy, tcp_xy, and delta_xy must be two-dimensional')
+        if not (
+            np.all(np.isfinite(reference))
+            and np.all(np.isfinite(tcp))
+            and np.all(np.isfinite(delta))
+        ):
+            raise ValueError('reference advance inputs must be finite')
+
+        candidate = reference + delta
+        candidate[0] = np.clip(candidate[0], *self.action_workspace_x)
+        candidate[1] = np.clip(candidate[1], *self.action_workspace_y)
+        lead = candidate - tcp
+        lead_norm = float(np.linalg.norm(lead))
+        if lead_norm > max_reference_lead:
+            candidate = tcp + lead * (max_reference_lead / lead_norm)
+        return candidate
+
 
 @dataclass(frozen=True)
 class WaypointPlan:
