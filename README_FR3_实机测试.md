@@ -140,6 +140,15 @@ bash tools/fr3_comparison/fr3_test.sh home
 bash tools/fr3_comparison/fr3_test.sh start-check
 ```
 
+如果官方 effort 轨迹控制器在确认负载、工具和线缆无误后仍存在可重复的小量稳态误差，可在实验记录中明确标注后，将实测到位容差显式设为与比较客户端启动门限一致的 0.03 rad：
+
+```bash
+bash tools/fr3_comparison/fr3_test.sh home --arrival-tolerance 0.03
+bash tools/fr3_comparison/fr3_test.sh start-check --arrival-tolerance 0.03
+```
+
+默认仍为 0.01 rad；参数不允许超过 0.03 rad，且不改变 0.05 rad/s 静止门限、规划终点、限位或碰撞检查。四种方法必须使用同一容差，并保留实际起点记录。
+
 如果起点碰撞、规划失败、关节状态超过 100 ms 未更新、机器人在规划后移动、控制器未激活或执行失败，工具报错退出，不修改 trial 起点来让检查通过。回起点日志在 `experiment_logs/home_*.jsonl`，不会混入方法结果。
 
 ## 6. 先做 dry-run，再运行 A
@@ -174,6 +183,14 @@ bash tools/fr3_comparison/fr3_test.sh enable
 ```
 
 **这一次 enable 会开始模型控制的机械臂运动。** 运行前保留现场急停与既有 Franka 安全设置。不要同时运行 RViz Execute、pose_target 或其他发送同一控制器目标的程序；本工具的进程锁只约束同用户的本工具，不锁定所有 ROS 应用。
+
+默认按原始 0.05 秒节点间隔执行。若配对 trial 的离散参考本身超过 0.6 rad/s 保守门限，不要直接提高速度限制；可将模型相位和整条执行时间统一放慢，例如：
+
+```bash
+bash tools/fr3_comparison/fr3_test.sh run A --time-scale 3
+```
+
+此时 8.8 秒模型轨迹约用 26.4 秒执行，重规划周期和每段轨迹节点时间也同步放慢三倍。速度、碰撞与 URDF 限位检查仍启用；四种方法必须使用相同的 `--time-scale` 并在实验结果中注明。
 
 运行按 trial 时长自动停止并记录。为开始下一次试验，先 Ctrl+C 退出客户端，再回起点；不要直接重新 enable 从终点继续试验。
 

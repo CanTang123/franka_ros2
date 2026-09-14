@@ -96,6 +96,16 @@ def export_report(log, output, run_id=1, plots=True):
     with (out / "plans.jsonl").open("w") as handle:
         for row in plans:
             handle.write(json.dumps(row, allow_nan=False) + "\n")
+    latency_rows = [dict(request_id=r.get("request", {}).get("request_id", ""),
+                         trajectory_start_index=r.get("trajectory_start_index", ""),
+                         trajectory_end_index=r.get("trajectory_end_index", ""),
+                         set_delay_ms=r.get("simulated_delay_ms", ""),
+                         request_to_send_ms=1000*r.get("request_to_send_s", r.get("latency_s", 0)),
+                         simulated_wait_ms=1000*r.get("stage_timings_s", {}).get("inference_reply_s", 0),
+                         collision_checks_ms=1000*r.get("stage_timings_s", {}).get("collision_checks_s", 0))
+                    for r in plans]
+    write_csv(out / "delay_timing.csv", ["request_id", "trajectory_start_index", "trajectory_end_index",
+              "set_delay_ms", "request_to_send_ms", "simulated_wait_ms", "collision_checks_ms"], latency_rows)
     if not joints:
         warnings.append("No measured joint samples")
     if not poses:
@@ -112,10 +122,12 @@ def export_report(log, output, run_id=1, plots=True):
                     nonincreasing_receipt_times=sum(g <= 0 for g in gaps))
     joint_summary = []
     active_joints = [p for p in joints if p["phase"] == "active"]
+    configured_names = (init.get("site_config") or {}).get(
+        "joint_names", [f"fr3_joint{i}" for i in range(1, 8)])
     for i in range(1, 8):
         q, dq = f"q{i}_rad", f"dq{i}_rad_s"
         if joints:
-            joint_summary.append(dict(joint=f"fr3_joint{i}", initial_rad=joints[0][q],
+            joint_summary.append(dict(joint=configured_names[i-1], initial_rad=joints[0][q],
                 last_active_rad=active_joints[-1][q] if active_joints else None,
                 final_recorded_rad=joints[-1][q], min_rad=min(r[q] for r in joints),
                 max_rad=max(r[q] for r in joints), peak_abs_velocity_rad_s=max(abs(r[dq]) for r in joints)))
@@ -141,6 +153,8 @@ def export_report(log, output, run_id=1, plots=True):
         ee_summary[frame] = dict(active=pose_summary([r for r in rows if r["phase"] == "active"]),
                                  including_post_stop=pose_summary(rows))
     summary = dict(schema="fr3_motion_report_v1", run_id=run_id, method=init.get("method"),
+        experiment_type=init.get("experiment_type"), model_called=init.get("model_called"),
+        simulated_delay_ms=init.get("simulated_delay_ms"),
         dry_run=init.get("dry_run"), synthetic=init.get("synthetic", False),
         condition_id=init.get("trial", {}).get("condition_id"), source=init.get("trial", {}).get("source"),
         log=str(Path(log).resolve()), log_snapshot_sha256=digest,
@@ -155,7 +169,7 @@ def export_report(log, output, run_id=1, plots=True):
                        "Joint data is not resampled; controller desired positions are separate from model plans.")
     if plots:
         try:
-            summary["figures"] = plot_motion(out, summary, joints, poses, feedback)
+            summary["figures"] = plot_motion(out, summary, joints, poses, feedback, latency_rows)
         except ImportError as error:
             summary["warnings"].append(f"Plot dependency missing: {error}; CSV/JSON saved. Install python3-matplotlib.")
     (out / "summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
@@ -169,7 +183,7 @@ def export_report(log, output, run_id=1, plots=True):
     return summary
 
 
-def plot_motion(out, summary, joints, poses, feedback):
+def plot_motion(out, summary, joints, poses, feedback, latency_rows):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -211,6 +225,27 @@ def plot_motion(out, summary, joints, poses, feedback):
             axes[0].legend(loc="upper right")
             axes[-1].set_xlabel("Time since enable (s)")
             save(fig, filename)
+    if feedback:
+        fig, axes = plt.subplots(7, 1, figsize=(11, 12), sharex=True)
+        t = [r["time_s"] for r in feedback]
+        for i, ax in enumerate(axes, 1):
+            line(ax, t, [r[f"error_q{i}_rad"] for r in feedback], color="#b23a48")
+            ax.set_ylabel(f"J{i} (rad)")
+            mark(ax)
+        axes[0].set_title("Controller tracking error (desired - actual)")
+        axes[-1].set_xlabel("Time since enable (s)")
+        save(fig, "joint_tracking_error")
+    if latency_rows:
+        fig, ax = plt.subplots(figsize=(11, 5))
+        x = [r["request_id"] for r in latency_rows]
+        actual = [r["request_to_send_ms"] for r in latency_rows]
+        ax.plot(x, actual, color="#2463ad", marker=".", ms=3, label="request to send/preview")
+        configured = latency_rows[0]["set_delay_ms"]
+        if configured != "":
+            ax.axhline(float(configured), color="#dd8935", ls="--", label="configured simulated delay")
+        ax.set(xlabel="Request id", ylabel="Latency (ms)", title="Configured delay vs actual request-to-send latency")
+        ax.legend()
+        save(fig, "delay_comparison")
     frames = sorted({r["frame_id"] for r in poses})
     for f, frame in enumerate(frames):
         rows = [r for r in poses if r["frame_id"] == frame]

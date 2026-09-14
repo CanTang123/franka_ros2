@@ -88,6 +88,10 @@ class ComparisonTests(unittest.TestCase):
             protocol.guard_prefix([[.1] * 7], [0.] * 7, [-1.] * 7, [1.] * 7, .03, .6)
         with self.assertRaises(ValueError):
             protocol.guard_prefix([[2.] * 7], [0.] * 7, [-1.] * 7, [1.] * 7, 10., 100.)
+        with self.assertRaisesRegex(ValueError, "fr3_joint1"):
+            protocol.guard_prefix([[.04] * 7], [0.] * 7, [-1.] * 7, [1.] * 7, .03, .6)
+        protocol.guard_prefix([[.04] * 7], [0.] * 7, [-1.] * 7, [1.] * 7,
+                              .09, .6, control_dt=.15)
         samples = protocol.collision_samples([0.] * 7, [[.03] * 7])
         self.assertEqual(len(samples), 4)
         self.assertEqual(samples[-1], [.03] * 7)

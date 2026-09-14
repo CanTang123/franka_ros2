@@ -17,6 +17,15 @@
         type: franka_robot_state_broadcaster/FrankaRobotStateBroadcaster
 
 /**:
+  franka_robot_state_broadcaster:
+    ros__parameters:
+      # The comparison client does not need 1 kHz DDS telemetry. Keeping this
+      # broadcaster below the hardware loop rate avoids starving Python action
+      # and service callbacks while the 1 kHz controller manager keeps running.
+      update_rate: 100
+      convenience_publish_rate: 50
+
+/**:
   fr3_arm_controller:
     ros__parameters:
       command_interfaces:

@@ -49,16 +49,25 @@ def response(value, sent):
     return actions
 
 
-def guard_prefix(actions, current, lower, upper, max_step, max_speed):
+def guard_prefix(actions, current, lower, upper, max_step, max_speed, control_dt=.05):
+    if not math.isfinite(control_dt) or control_dt <= 0:
+        raise ValueError("control_dt must be finite and positive")
     vector(current, 7, "current joints")
     previous = current
-    for row in actions:
+    for point_index, row in enumerate(actions, 1):
         vector(row, 7, "target joints")
         if any(not low < q < high for low, q, high in zip(lower, row, upper)):
             raise ValueError("Joint target outside robot URDF limits")
-        step = max(abs(q - p) for q, p in zip(row, previous))
-        if step > max_step or step / .05 > max_speed:
-            raise ValueError("Target discontinuity/speed exceeds deployment limits")
+        differences = [abs(q - p) for q, p in zip(row, previous)]
+        joint_index = max(range(7), key=differences.__getitem__)
+        step = differences[joint_index]
+        speed = step / control_dt
+        if step > max_step or speed > max_speed:
+            raise ValueError(
+                "Target discontinuity/speed exceeds deployment limits: "
+                f"point={point_index}, joint={JOINTS[joint_index]}, "
+                f"step={step:.6f} rad (limit {max_step:.6f}), "
+                f"speed={speed:.6f} rad/s (limit {max_speed:.6f})")
         previous = row
 
 

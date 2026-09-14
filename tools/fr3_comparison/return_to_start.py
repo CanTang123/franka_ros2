@@ -38,13 +38,17 @@ class Home(Node):
         self.create_subscription(String, args.robot_description, self.on_description,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.planner = ActionClient(self, MoveGroup, args.move_action)
-        self.executor = ActionClient(self, ExecuteTrajectory, args.execute_action)
+        # ``Node.executor`` is owned by rclpy.  Overwriting it with an
+        # ActionClient makes rclpy.spin_once() treat the action client as an
+        # executor and fail while trying to call add_node().
+        self.trajectory_executor = ActionClient(self, ExecuteTrajectory, args.execute_action)
         self.validity = self.create_client(GetStateValidity, args.state_validity)
         self.controllers = self.create_client(ListControllers, args.controller_manager + '/list_controllers')
         self.preview = self.create_publisher(DisplayTrajectory, '/display_planned_path',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_service(Trigger, '~/stop', self.stop_service)
-        self.record('initialized', target_q_rad=self.target, execute=args.execute, trial=str(args.trial))
+        self.record('initialized', target_q_rad=self.target, execute=args.execute,
+                    arrival_tolerance_rad=args.arrival_tolerance, trial=str(args.trial))
 
     def record(self, event, **values):
         self.log.write(json.dumps(dict(event=event, monotonic_s=time.monotonic(), **values),
@@ -149,16 +153,25 @@ class Home(Node):
         while time.monotonic() < until:
             self.spin()
             q, dq = self.fresh()
-            if arrived(q, dq, self.target):
+            if arrived(q, dq, self.target, tolerance=self.args.arrival_tolerance):
                 stable = stable or time.monotonic()
                 if time.monotonic() - stable >= .3:
                     self.record('at_start', q_rad=q, dq_rad_s=dq,
-                                max_error_rad=max(abs(a-b) for a,b in zip(q,self.target)))
-                    print('起点检查通过：各关节误差 ≤0.01 rad，速度 ≤0.05 rad/s，持续 0.3 秒。', flush=True)
+                                max_error_rad=max(abs(a-b) for a,b in zip(q,self.target)),
+                                arrival_tolerance_rad=self.args.arrival_tolerance)
+                    print(f'起点检查通过：各关节误差 ≤{self.args.arrival_tolerance:.3f} rad，'
+                          '速度 ≤0.05 rad/s，持续 0.3 秒。', flush=True)
                     return
             else:
                 stable = None
-        raise ValueError('Measured trial-start position/stationarity check failed')
+        q, dq = self.fresh()
+        errors = [abs(a-b) for a,b in zip(q,self.target)]
+        worst = max(range(7), key=errors.__getitem__)
+        raise ValueError(
+            'Measured trial-start position/stationarity check failed: '
+            f'worst=fr3_joint{worst + 1}, error={errors[worst]:.6f} rad, '
+            f'tolerance={self.args.arrival_tolerance:.6f} rad, '
+            f'max_speed={max(map(abs, dq)):.6f} rad/s')
 
     def run(self):
         deadline = time.monotonic() + 15.
@@ -183,7 +196,7 @@ class Home(Node):
             return
         if max(map(abs,dq)) > .05:
             raise ValueError('Robot must be stationary before planning')
-        if arrived(q,dq,self.target):
+        if arrived(q, dq, self.target, tolerance=self.args.arrival_tolerance):
             self.settle()
             return
         if not self.planner.wait_for_server(timeout_sec=5.):
@@ -225,7 +238,7 @@ class Home(Node):
         if not self.args.execute:
             print('仅规划完成，未执行。规划轨迹已写入日志并发布至 /display_planned_path。', flush=True)
             return
-        if not self.executor.wait_for_server(timeout_sec=5.) or not self.controllers.wait_for_service(timeout_sec=5.):
+        if not self.trajectory_executor.wait_for_server(timeout_sec=5.) or not self.controllers.wait_for_service(timeout_sec=5.):
             raise ValueError('MoveIt execution/controller manager unavailable')
         controllers = self.wait(self.controllers.call_async(ListControllers.Request()), 3.)
         controller_name = self.args.controller.rstrip('/').rsplit('/', 1)[-1]
@@ -248,7 +261,7 @@ class Home(Node):
         execution.trajectory = planned.planned_trajectory
         execution.controller_names = [controller_name]
         self.record('execution_started')
-        self.action(self.executor, execution, points[-1]['time_s'] + 10., monitor=True)
+        self.action(self.trajectory_executor, execution, points[-1]['time_s'] + 10., monitor=True)
         self.settle()
 
 
@@ -267,7 +280,11 @@ def main():
     p.add_argument('--execute-action', default='/execute_trajectory')
     p.add_argument('--controller', default='/fr3_arm_controller')
     p.add_argument('--controller-manager', default='/controller_manager')
+    p.add_argument('--arrival-tolerance', type=float, default=.01,
+                   help='Measured joint arrival tolerance in rad; maximum 0.03')
     args = p.parse_args()
+    if not math.isfinite(args.arrival_tolerance) or not 0 < args.arrival_tolerance <= .03:
+        p.error('--arrival-tolerance must be finite and within (0, 0.03] rad')
     lease = ControlLease(args.controller)
     from rclpy.signals import SignalHandlerOptions
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)

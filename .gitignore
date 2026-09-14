@@ -31,3 +31,7 @@ __pycache__/
 /comparison_validation/
 /experiment_logs/
 /local_models/
+/fr3_joint_sequences/
+/fr3_joint_sequences_safe/
+/fr3_joint_sequences_continuous/
+conditional_model_800_formal/

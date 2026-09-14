@@ -1,0 +1,37 @@
+{
+  "passed": true,
+  "rows": [
+    {
+      "method": "A",
+      "loopback_roundtrip_s": 0.007337800998357125,
+      "inference_s": 0.006329349002044182
+    },
+    {
+      "method": "B",
+      "loopback_roundtrip_s": 0.010721582999394741,
+      "inference_s": 0.009810671006562188
+    },
+    {
+      "method": "C",
+      "loopback_roundtrip_s": 0.00367716999608092,
+      "inference_s": 0.0029181299978517927
+    },
+    {
+      "method": "D",
+      "loopback_roundtrip_s": 0.003911351996066514,
+      "inference_s": 0.0031509149994235486
+    }
+  ],
+  "wrong_trial_rejected": true,
+  "device_info": {
+    "backend": "cpu",
+    "devices": [
+      "TFRT_CPU_0"
+    ],
+    "device_kinds": [
+      "cpu"
+    ],
+    "physics_backend": "native MuJoCo CPU"
+  },
+  "scope": "Loopback HTTP; no SSH/WAN/ROS/hardware verification"
+}
